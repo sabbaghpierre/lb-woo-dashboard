@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>LB Woo Tracker · Leads</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">
+    <strong>LB Woo Tracker</strong>
+    <span id="updated" class="muted small"></span>
+  </div>
+  <div class="topbar-actions">
+    <button id="btn-theme" title="Toggle theme (T)" class="icon-btn">🌓</button>
+    <button id="btn-settings" title="Settings (,)" class="icon-btn">⚙</button>
+    <button id="btn-lock" title="Lock dashboard (L)" class="icon-btn">🔒</button>
+  </div>
+</header>
+
+<main id="main" hidden>
+  <section id="stats" class="stats"></section>
+
+  <section id="filters">
+    <div class="filter-row">
+      <span class="filter-label">Tier:</span>
+      <div class="filter-group" data-filter="tier">
+        <button class="chip active" data-value="all">All</button>
+        <button class="chip" data-value="A">A</button>
+        <button class="chip" data-value="B">B</button>
+        <button class="chip" data-value="C">C</button>
+      </div>
+    </div>
+    <div class="filter-row">
+      <span class="filter-label">Status:</span>
+      <div class="filter-group" data-filter="status">
+        <button class="chip active" data-value="all">All</button>
+        <button class="chip" data-value="no_app">No app</button>
+        <button class="chip" data-value="has_app">Has app</button>
+        <button class="chip" data-value="app_unknown">Unknown</button>
+      </div>
+    </div>
+    <div class="filter-row">
+      <span class="filter-label">Contact:</span>
+      <div class="filter-group" data-filter="contact">
+        <button class="chip active" data-value="all">All</button>
+        <button class="chip" data-value="uncontacted">Uncontacted</button>
+        <button class="chip" data-value="contacted">Contacted</button>
+        <button class="chip" data-value="not_interested">Not interested</button>
+      </div>
+    </div>
+    <div class="filter-row">
+      <span class="filter-label">Search:</span>
+      <input id="search" type="search" placeholder="domain or store name (/)" autocomplete="off">
+      <button id="btn-export" class="ghost-btn">Export filtered as CSV</button>
+    </div>
+  </section>
+
+  <section id="table-wrap">
+    <table id="leads-table">
+      <thead>
+        <tr>
+          <th data-sort="lead_score" class="sortable sorted-desc">Score</th>
+          <th data-sort="lead_tier" class="sortable">Tier</th>
+          <th data-sort="status" class="sortable">Status</th>
+          <th data-sort="domain" class="sortable">Domain</th>
+          <th data-sort="store_name" class="sortable">Store</th>
+          <th data-sort="app_age" class="sortable">App age</th>
+          <th>Reasons</th>
+          <th data-sort="last_checked" class="sortable">Last check</th>
+          <th data-sort="contacted" class="sortable">Contact</th>
+        </tr>
+      </thead>
+      <tbody id="leads-body"></tbody>
+    </table>
+    <div id="empty-state" class="empty-state" hidden>No leads match these filters.</div>
+  </section>
+
+  <footer class="muted small">
+    <span id="footer-counts"></span> ·
+    Keyboard: <kbd>/</kbd> search · <kbd>j</kbd>/<kbd>k</kbd> move ·
+    <kbd>Enter</kbd> expand · <kbd>c</kbd> contacted · <kbd>e</kbd> copy email ·
+    <kbd>n</kbd> not interested · <kbd>Esc</kbd> close
+  </footer>
+</main>
+
+<!-- Passphrase gate -->
+<div id="auth-overlay" class="overlay">
+  <form id="auth-form" class="card">
+    <h2>🔒 Enter passphrase</h2>
+    <p class="muted small">
+      Lead data is AES-GCM encrypted. Your passphrase is derived to a key
+      with PBKDF2 (200k rounds) and never leaves your browser.
+    </p>
+    <input id="auth-passphrase" type="password" autocomplete="current-password"
+           placeholder="passphrase" required>
+    <label class="checkbox">
+      <input id="auth-remember" type="checkbox" checked>
+      Remember on this device
+    </label>
+    <p id="auth-error" class="error" hidden></p>
+    <button type="submit" id="auth-submit">Unlock</button>
+    <p class="muted small">
+      Last updated: <span id="auth-updated">…</span>
+    </p>
+  </form>
+</div>
+
+<!-- Loading state -->
+<div id="loading-overlay" class="overlay">
+  <div class="card"><div class="spinner"></div><p>Loading…</p></div>
+</div>
+
+<!-- Settings modal -->
+<div id="settings-modal" class="overlay" hidden>
+  <div class="card wide">
+    <header class="modal-header">
+      <h2>Settings</h2>
+      <button class="icon-btn close-modal" data-close="settings-modal">✕</button>
+    </header>
+    <div class="modal-body">
+      <h3>Email template — no app (cold)</h3>
+      <textarea id="tpl-no-app" rows="14"></textarea>
+
+      <h3>Email template — has app (revamp)</h3>
+      <textarea id="tpl-has-app" rows="14"></textarea>
+
+      <h3>Signature / signoff</h3>
+      <textarea id="tpl-signature" rows="4"></textarea>
+
+      <h3>Portfolio URL</h3>
+      <input id="tpl-portfolio" type="url" placeholder="https://sabbaghpierre.github.io">
+
+      <p class="muted small">
+        Merge fields:
+        <code>{{store_name}}</code> <code>{{domain}}</code>
+        <code>{{app_age}}</code> <code>{{app_age_year}}</code>
+        <code>{{signature}}</code> <code>{{portfolio_url}}</code>
+        <code>{{ios_url}}</code> <code>{{android_url}}</code>
+      </p>
+
+      <hr>
+      <h3>Backup &amp; restore</h3>
+      <p class="muted small">Contacted flags and notes live in this browser only. Export to back up across devices.</p>
+      <div class="btn-row">
+        <button id="btn-export-personal" class="ghost-btn">Export personal data (JSON)</button>
+        <label class="ghost-btn">
+          Import personal data
+          <input id="import-personal" type="file" accept="application/json" hidden>
+        </label>
+      </div>
+
+      <hr>
+      <h3>Danger zone</h3>
+      <div class="btn-row">
+        <button id="btn-clear-personal" class="danger-btn">Clear contacted &amp; notes</button>
+        <button id="btn-clear-cache" class="danger-btn">Forget passphrase &amp; reload</button>
+      </div>
+    </div>
+    <footer class="modal-footer">
+      <button id="btn-save-settings" class="primary-btn">Save settings</button>
+    </footer>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
