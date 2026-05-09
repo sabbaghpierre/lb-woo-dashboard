@@ -15,6 +15,7 @@
   --status-has-app: #d97706;
   --status-unknown: #6b7280;
   --danger: #dc2626;
+  --link: #2563eb;
   --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
   --radius: 8px;
 }
@@ -35,8 +36,12 @@
   --status-has-app: #f59e0b;
   --status-unknown: #94a3b8;
   --danger: #ef4444;
+  --link: #ffffff;
   --shadow: 0 1px 3px rgba(0,0,0,.4);
 }
+
+a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+a:hover { filter: brightness(.85); }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
