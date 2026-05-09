@@ -215,6 +215,9 @@ footer { margin-top: 18px; color: var(--muted); font-size: 11px; }
   display: flex; align-items: center; justify-content: center; z-index: 100;
   padding: 20px;
 }
+/* The `display: flex` above wins over the [hidden] attribute's UA `display: none`,
+   so we restore it explicitly. Without this, modals marked `hidden` still show. */
+.overlay[hidden] { display: none !important; }
 [data-theme="dark"] .overlay { background: rgba(0, 0, 0, .65); }
 .overlay .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
