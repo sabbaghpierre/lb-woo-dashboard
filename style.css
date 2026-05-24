@@ -255,16 +255,17 @@ footer { margin-top: 18px; color: var(--muted); font-size: 11px; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Tiny toast */
+/* Tiny toast — persistent element toggled with .show class */
 .toast {
-  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-  background: var(--text); color: var(--bg); padding: 8px 16px;
-  border-radius: var(--radius); font-size: 13px; z-index: 200;
-  animation: fade-in-out 2.4s ease;
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+  background: #222; color: #fff; padding: 10px 18px;
+  border-radius: 6px; font-size: 0.95rem; z-index: 1000;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
-@keyframes fade-in-out {
-  0%, 100% { opacity: 0; }
-  10%, 90% { opacity: 1; }
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
 }
 
 @media (max-width: 700px) {
@@ -272,5 +273,140 @@ footer { margin-top: 18px; color: var(--muted); font-size: 11px; }
   td { padding: 6px; font-size: 12px; }
   .reasons { max-width: 150px; }
   th[data-sort="store_name"], td:nth-child(5),
-  th[data-sort="last_checked"], td:nth-child(8) { display: none; }
+  th[data-sort="last_checked"], td:nth-child(9) { display: none; }
+}
+
+/* ---------- Tap targets (>=44x44px) ---------- */
+button, .icon-btn, select, .chip {
+  min-height: 44px;
+  min-width: 44px;
+}
+.chip {
+  padding-left: 14px;
+  padding-right: 14px;
+}
+
+/* ---------- Reach cell ---------- */
+.col-reach {
+  white-space: nowrap;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reach-missing {
+  color: var(--muted, #999);
+}
+.reach-email {
+  text-decoration: none;
+}
+.reach-email:hover {
+  text-decoration: underline;
+}
+.reach-sep {
+  color: var(--muted, #999);
+  margin: 0 0.25rem;
+}
+.reach-wa {
+  text-decoration: none;
+  font-size: 1.1rem;
+}
+
+/* ---------- Expanded Reach section ---------- */
+.expand-section {
+  margin-top: 1rem;
+}
+.expand-section h4 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  color: var(--muted, #888);
+  letter-spacing: 0.05em;
+}
+.expand-contact-row {
+  padding: 4px 0;
+}
+.role-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--chip-bg, #eee);
+  margin-right: 0.5rem;
+  min-height: 0;
+  min-width: 0;
+}
+.role-personal { background: #d4edda; color: #155724; }
+.role-role     { background: #fff3cd; color: #856404; }
+.role-support  { background: #f8d7da; color: #721c24; }
+.role-whatsapp { background: #d1f3d4; color: #075e54; }
+.role-phone    { background: #e2e3e5; color: #383d41; }
+.contact-val { font-family: var(--mono, ui-monospace, "SF Mono", Menlo, monospace); }
+
+/* ---------- Sticky header (desktop) ---------- */
+@media (min-width: 769px) {
+  #leads-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--bg, #fff);
+    z-index: 10;
+  }
+}
+
+/* ---------- Tablet & smaller: card view ---------- */
+@media (max-width: 768px) {
+  #filters {
+    position: sticky;
+    top: 0;
+    background: var(--bg, #fff);
+    z-index: 20;
+    padding: 8px;
+  }
+
+  /* Collapse table to card view */
+  #leads-table, #leads-table thead, #leads-table tbody, #leads-table tr,
+  #leads-table th, #leads-table td {
+    display: block;
+  }
+  #leads-table thead {
+    display: none;
+  }
+  #leads-table tr.lead-row {
+    border: 1px solid var(--border, #ddd);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    padding: 10px;
+    background: var(--card-bg, #fafafa);
+  }
+  #leads-table td {
+    border: none;
+    padding: 6px 0;
+    position: relative;
+    padding-left: 40%;
+  }
+  #leads-table td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 0;
+    width: 38%;
+    font-weight: 600;
+    color: var(--muted, #666);
+    font-size: 0.85rem;
+  }
+  .col-reach {
+    max-width: none;
+    white-space: normal;
+  }
+  /* Expanded row spans full width below its card */
+  #leads-table tr.expanded-row td {
+    padding-left: 10px;
+  }
+}
+
+/* ---------- Phone ---------- */
+@media (max-width: 480px) {
+  body { font-size: 15px; }
+  #filters .filter-row { flex-direction: column; align-items: flex-start; }
+  #filters input[type=search] { width: 100%; }
 }

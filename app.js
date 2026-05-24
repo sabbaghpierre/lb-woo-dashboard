@@ -73,7 +73,7 @@ const state = {
   envelope: null,        // raw envelope from leads.encrypted.json
   data: null,            // decrypted: { schema_version, generated_at, counts, leads }
   filtered: [],          // current filter+sort view
-  filters: { tier: "all", status: "all", contact: "all", search: "" },
+  filters: { tier: "all", status: "all", contact: "all", platform: "all", search: "" },
   sort: { key: "lead_score", dir: "desc" },
   selectedIndex: -1,
   expandedDomain: null,
@@ -265,6 +265,7 @@ function applyFiltersAndSort() {
   let rows = (state.data.leads || []).slice();
 
   rows = rows.filter(L => {
+    if (state.filters.platform !== "all" && L.platform !== state.filters.platform) return false;
     if (state.filters.tier !== "all" && L.lead_tier !== state.filters.tier) return false;
     if (state.filters.status !== "all" && L.status !== state.filters.status) return false;
     const c = contacted[L.domain]?.status || "uncontacted";
@@ -320,6 +321,14 @@ function renderTable() {
   // Re-attach handlers
   tbody.querySelectorAll("tr.lead-row").forEach(tr => {
     tr.addEventListener("click", (e) => {
+      // Reach-email click-to-copy (handled before row-expand)
+      const reachEmail = e.target.closest(".reach-email");
+      if (reachEmail) {
+        e.preventDefault();
+        e.stopPropagation();
+        copyToClipboard(reachEmail.dataset.copy, `Copied ${reachEmail.dataset.copy}`);
+        return;
+      }
       if (e.target.closest("button, a, textarea, input")) return;
       toggleExpand(tr.dataset.domain);
     });
@@ -359,17 +368,36 @@ function renderRow(L, idx, contact) {
   if (idx === state.selectedIndex) rowClass.push("selected");
   if (contactStatus) rowClass.push(contactStatus);
 
+  // Reach: top extracted email + whatsapp/phone
+  const emails = L.emails || [];
+  const phones = L.phones || [];
+  const wa = phones.find(p => p.channel === "whatsapp");
+  const reachParts = [];
+  if (emails[0]) {
+    reachParts.push(`<a href="#" class="reach-email" data-copy="${escapeHtml(emails[0].address)}" title="Copy ${escapeHtml(emails[0].address)}">${escapeHtml(emails[0].address)}</a>`);
+  }
+  if (wa) {
+    const num = wa.number.replace("+", "");
+    reachParts.push(`<a href="https://wa.me/${escapeHtml(num)}" target="_blank" rel="noopener" class="reach-wa" title="WhatsApp">📱</a>`);
+  } else if (phones[0]) {
+    reachParts.push(`<a href="tel:${escapeHtml(phones[0].number)}" class="reach-phone">${escapeHtml(phones[0].number)}</a>`);
+  }
+  const reachCell = reachParts.length
+    ? reachParts.join('<span class="reach-sep"> · </span>')
+    : '<span class="reach-missing">—</span>';
+
   return `
     <tr class="${rowClass.join(" ")}" data-domain="${escapeHtml(L.domain)}" data-idx="${idx}">
-      <td class="score">${score}</td>
-      <td><span class="tier-badge tier-${tier}">${tier}</span></td>
-      <td><span class="status-badge status-${status}">${humanStatus(status)}</span></td>
-      <td><a href="https://${escapeHtml(L.domain)}" target="_blank" rel="noopener noreferrer">${escapeHtml(L.domain)}</a></td>
-      <td>${escapeHtml(L.store_name || "")}</td>
-      <td>${ageStr}</td>
-      <td><div class="reasons">${reasons}</div></td>
-      <td>${escapeHtml(L.last_checked || "")}</td>
-      <td><span class="contact-tag ${contactStatus}">${contactLabel}</span></td>
+      <td class="score" data-label="Score">${score}</td>
+      <td data-label="Tier"><span class="tier-badge tier-${tier}">${tier}</span></td>
+      <td data-label="Status"><span class="status-badge status-${status}">${humanStatus(status)}</span></td>
+      <td data-label="Domain"><a href="https://${escapeHtml(L.domain)}" target="_blank" rel="noopener noreferrer">${escapeHtml(L.domain)}</a></td>
+      <td data-label="Store">${escapeHtml(L.store_name || "")}</td>
+      <td class="col-reach" data-label="Reach">${reachCell}</td>
+      <td data-label="App age">${ageStr}</td>
+      <td data-label="Reasons"><div class="reasons">${reasons}</div></td>
+      <td data-label="Last check">${escapeHtml(L.last_checked || "")}</td>
+      <td data-label="Contact"><span class="contact-tag ${contactStatus}">${contactLabel}</span></td>
     </tr>
   `;
 }
@@ -387,7 +415,7 @@ function injectExpanded(rowEl) {
   expandedTr.className = "expanded-row";
   expandedTr.dataset.expandedFor = domain;
   const td = document.createElement("td");
-  td.colSpan = 9;
+  td.colSpan = 10;
   td.innerHTML = renderExpandedContent(lead);
   expandedTr.appendChild(td);
   rowEl.parentNode.insertBefore(expandedTr, rowEl.nextSibling);
@@ -455,6 +483,17 @@ function renderExpandedContent(L) {
   const which = L.status === "has_app" ? "hasApp" : "noApp";
   const draft = buildEmail(L, which);
 
+  // Build contact-info block (emails + phones with role/channel badges).
+  const emailsHtml = (L.emails || []).map(e =>
+    `<div class="expand-contact-row"><span class="role-badge role-${escapeHtml(e.role)}">${escapeHtml(e.role)}</span> <span class="contact-val">${escapeHtml(e.address)}</span></div>`
+  ).join("");
+  const phonesHtml = (L.phones || []).map(p =>
+    `<div class="expand-contact-row"><span class="role-badge role-${escapeHtml(p.channel)}">${escapeHtml(p.channel)}</span> <span class="contact-val">${escapeHtml(p.number)}</span></div>`
+  ).join("");
+  const reachBlock = (emailsHtml || phonesHtml)
+    ? `<section class="expand-section"><h4>Reach</h4>${emailsHtml}${phonesHtml}</section>`
+    : "";
+
   return `
     <div class="expanded-content">
       <div class="expanded-grid">
@@ -487,6 +526,7 @@ function renderExpandedContent(L) {
             <h4>Apps</h4>
             ${apps}
           </div>
+          ${reachBlock}
         </div>
 
         <div>
@@ -909,15 +949,26 @@ function formatRelativeAndAbsolute(iso) {
   return `${rel} (${d.toISOString().slice(0, 16).replace("T", " ")} UTC)`;
 }
 
-function copyToClipboard(text) {
+function showToast(message) {
+  const t = document.getElementById("toast");
+  if (!t) return;
+  t.textContent = message;
+  t.classList.add("show");
+  clearTimeout(showToast._timer);
+  showToast._timer = setTimeout(() => t.classList.remove("show"), 1500);
+}
+
+function copyToClipboard(text, message) {
+  const msg = message || "Copied to clipboard";
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).then(() => toast("Copied to clipboard"));
+    navigator.clipboard.writeText(text).then(() => showToast(msg)).catch(() => showToast("Copy failed"));
     return;
   }
   // Fallback
   const ta = document.createElement("textarea");
   ta.value = text; document.body.appendChild(ta); ta.select();
-  try { document.execCommand("copy"); toast("Copied to clipboard"); }
+  try { document.execCommand("copy"); showToast(msg); }
+  catch { showToast("Copy failed"); }
   finally { ta.remove(); }
 }
 
@@ -930,14 +981,8 @@ function download(filename, content, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-let toastTimer;
 function toast(msg) {
-  clearTimeout(toastTimer);
-  document.querySelector(".toast")?.remove();
-  const t = document.createElement("div");
-  t.className = "toast"; t.textContent = msg;
-  document.body.appendChild(t);
-  toastTimer = setTimeout(() => t.remove(), 2400);
+  showToast(msg);
 }
 
 function escapeHtml(s) {

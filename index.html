@@ -44,6 +44,14 @@
       </div>
     </div>
     <div class="filter-row">
+      <span class="filter-label">Platform:</span>
+      <div class="filter-group" data-filter="platform">
+        <button class="chip active" data-value="all">All</button>
+        <button class="chip" data-value="woo">WooCommerce</button>
+        <button class="chip" data-value="shopify">Shopify</button>
+      </div>
+    </div>
+    <div class="filter-row">
       <span class="filter-label">Contact:</span>
       <div class="filter-group" data-filter="contact">
         <button class="chip active" data-value="all">All</button>
@@ -68,6 +76,7 @@
           <th data-sort="status" class="sortable">Status</th>
           <th data-sort="domain" class="sortable">Domain</th>
           <th data-sort="store_name" class="sortable">Store</th>
+          <th>Reach</th>
           <th data-sort="app_age" class="sortable">App age</th>
           <th>Reasons</th>
           <th data-sort="last_checked" class="sortable">Last check</th>
@@ -167,5 +176,6 @@
 </div>
 
 <script src="app.js"></script>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>
