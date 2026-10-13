@@ -52,17 +52,29 @@
       </div>
     </div>
     <div class="filter-row">
-      <span class="filter-label">Contact:</span>
+      <span class="filter-label">Pipeline:</span>
       <div class="filter-group" data-filter="contact">
         <button class="chip active" data-value="all">All</button>
-        <button class="chip" data-value="uncontacted">Uncontacted</button>
-        <button class="chip" data-value="contacted">Contacted</button>
-        <button class="chip" data-value="not_interested">Not interested</button>
+        <button class="chip" data-value="uncontacted">New</button>
+        <button class="chip" data-value="active">Active</button>
+        <button class="chip" data-value="won">Won</button>
+        <button class="chip" data-value="lost">Lost</button>
+      </div>
+    </div>
+    <div class="filter-row">
+      <span class="filter-label">Reach:</span>
+      <div class="filter-group" data-filter="reach">
+        <button class="chip active" data-value="all">All</button>
+        <button class="chip" data-value="personal">Personal email</button>
+        <button class="chip" data-value="whatsapp">WhatsApp</button>
+        <button class="chip" data-value="any">Any contact</button>
+        <button class="chip" data-value="none">No contact</button>
       </div>
     </div>
     <div class="filter-row">
       <span class="filter-label">Search:</span>
-      <input id="search" type="search" placeholder="domain or store name (/)" autocomplete="off">
+      <input id="search" type="search" placeholder="domain, store, or email (/)" autocomplete="off">
+      <button id="btn-focus" class="ghost-btn" title="Top 10 new, reachable leads by priority">★ Top 10</button>
       <button id="btn-export" class="ghost-btn">Export filtered as CSV</button>
     </div>
   </section>
@@ -76,11 +88,12 @@
           <th data-sort="status" class="sortable">Status</th>
           <th data-sort="domain" class="sortable">Domain</th>
           <th data-sort="store_name" class="sortable">Store</th>
+          <th data-sort="product_count" class="sortable">Value</th>
           <th>Reach</th>
           <th data-sort="app_age" class="sortable">App age</th>
           <th>Reasons</th>
           <th data-sort="last_checked" class="sortable">Last check</th>
-          <th data-sort="contacted" class="sortable">Contact</th>
+          <th data-sort="contacted" class="sortable">Pipeline</th>
         </tr>
       </thead>
       <tbody id="leads-body"></tbody>
@@ -92,7 +105,7 @@
     <span id="footer-counts"></span> ·
     Keyboard: <kbd>/</kbd> search · <kbd>j</kbd>/<kbd>k</kbd> move ·
     <kbd>Enter</kbd> expand · <kbd>c</kbd> contacted · <kbd>e</kbd> copy email ·
-    <kbd>n</kbd> not interested · <kbd>Esc</kbd> close
+    <kbd>w</kbd> copy WhatsApp · <kbd>d</kbd> dismiss · <kbd>Esc</kbd> close
   </footer>
 </main>
 
@@ -137,6 +150,9 @@
       <h3>Email template — has app (revamp)</h3>
       <textarea id="tpl-has-app" rows="14"></textarea>
 
+      <h3>WhatsApp template (short)</h3>
+      <textarea id="tpl-whatsapp" rows="6"></textarea>
+
       <h3>Signature / signoff</h3>
       <textarea id="tpl-signature" rows="4"></textarea>
 
@@ -147,6 +163,7 @@
         Merge fields:
         <code>{{store_name}}</code> <code>{{domain}}</code>
         <code>{{app_age}}</code> <code>{{app_age_year}}</code>
+        <code>{{product_count}}</code> <code>{{app_name}}</code>
         <code>{{signature}}</code> <code>{{portfolio_url}}</code>
         <code>{{ios_url}}</code> <code>{{android_url}}</code>
       </p>
@@ -165,7 +182,8 @@
       <hr>
       <h3>Danger zone</h3>
       <div class="btn-row">
-        <button id="btn-clear-personal" class="danger-btn">Clear contacted &amp; notes</button>
+        <button id="btn-restore-hidden" class="ghost-btn">Restore dismissed (0)</button>
+        <button id="btn-clear-personal" class="danger-btn">Clear pipeline &amp; notes</button>
         <button id="btn-clear-cache" class="danger-btn">Forget passphrase &amp; reload</button>
       </div>
     </div>

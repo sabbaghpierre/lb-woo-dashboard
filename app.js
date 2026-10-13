@@ -18,11 +18,14 @@
 const DATA_URL = "leads.encrypted.json";
 const LS_KEYS = {
   passphrase: "lbwt:passphrase",
-  contacted: "lbwt:contacted",          // { domain: { at: iso, status: "contacted"|"not_interested" } }
+  contacted: "lbwt:contacted",            // legacy, migrated into pipeline on load
+  pipeline: "lbwt:pipeline",              // { domain: { stage, at: iso-date, followup: iso-date|"" } }
+  hidden: "lbwt:hidden",                  // { domain: true } dismissed leads
   notes: "lbwt:notes",                  // { domain: "free text" }
   theme: "lbwt:theme",                  // "light" | "dark"
   templateNoApp: "lbwt:tpl:noApp",
   templateHasApp: "lbwt:tpl:hasApp",
+  templateWa: "lbwt:tpl:wa",
   templateSig: "lbwt:tpl:sig",
   templatePortfolio: "lbwt:tpl:portfolio",
   filters: "lbwt:filters",
@@ -67,17 +70,25 @@ Would Tuesday or Wednesday work for a 20-minute call? I'll come prepared with a 
 {{android_url}}`,
   sig: "Pierre Sabbagh",
   portfolio: "https://sabbaghpierre.github.io",
+  whatsapp:
+`Hi {{store_name}} — I'm a Lebanon-based mobile developer working with Lebanese shops like {{domain}}. I'd love to put together a free app demo for you this week — worth a 20-min call Tue/Wed? {{signature}}`,
 };
 
 const state = {
   envelope: null,        // raw envelope from leads.encrypted.json
   data: null,            // decrypted: { schema_version, generated_at, counts, leads }
   filtered: [],          // current filter+sort view
-  filters: { tier: "all", status: "all", contact: "all", platform: "all", search: "" },
-  sort: { key: "lead_score", dir: "desc" },
+  filters: { tier: "all", status: "all", contact: "all", platform: "all", reach: "all", focus: false, search: "" },
+  sort: { key: "priority", dir: "desc" },
   selectedIndex: -1,
   expandedDomain: null,
 };
+
+const STAGE_LABELS = {
+  contacted: "Contacted", replied: "Replied", meeting: "Meeting",
+  won: "Won", lost: "Lost",
+};
+const ACTIVE_STAGES = new Set(["contacted", "replied", "meeting"]);
 
 // ──────────────────────────────────────────────────────────────────────────
 // LocalStorage helpers
@@ -93,6 +104,88 @@ const ls = {
   },
   del(key) { try { localStorage.removeItem(key); } catch {} },
 };
+
+// ──────────────────────────────────────────────────────────────────────────
+// Pipeline (per-browser outreach state), reachability & priority
+// ──────────────────────────────────────────────────────────────────────────
+
+// stage: "contacted" | "replied" | "meeting" | "won" | "lost"
+// entry: { stage, at: "YYYY-MM-DD", followup: "YYYY-MM-DD" | "" }
+function migratePersonal() {
+  if (ls.get(LS_KEYS.pipeline) || !ls.get(LS_KEYS.contacted)) return;
+  const old = ls.get(LS_KEYS.contacted, {});
+  const next = {};
+  for (const [domain, v] of Object.entries(old)) {
+    next[domain] = {
+      stage: v?.status === "not_interested" ? "lost" : "contacted",
+      at: v?.at || "",
+      followup: "",
+    };
+  }
+  ls.set(LS_KEYS.pipeline, next);
+  ls.del(LS_KEYS.contacted);
+}
+
+function pipeOf(domain) {
+  return ls.get(LS_KEYS.pipeline, {})[domain] || null;
+}
+function stageOf(domain) {
+  return pipeOf(domain)?.stage || "";
+}
+function isHidden(domain) {
+  return !!ls.get(LS_KEYS.hidden, {})[domain];
+}
+function hasPersonal(L) { return (L.emails || []).some(e => e.role === "personal"); }
+function hasWa(L) { return (L.phones || []).some(p => p.channel === "whatsapp"); }
+function hasAnyContact(L) { return (L.emails || []).length > 0 || (L.phones || []).length > 0; }
+
+// Priority: lead score + catalog value + reachability. Decides the daily order.
+function priorityOf(L) {
+  let p = L.lead_score || 0;
+  const pc = L.product_count;
+  if (pc >= 100) p += 5;
+  else if (pc >= 21) p += 3;
+  else if (pc >= 1) p += 1;
+  if (hasPersonal(L)) p += 3;
+  else if (hasAnyContact(L)) p += 1;
+  if (hasWa(L)) p += 2;
+  return p;
+}
+
+function fmtCount(n) {
+  if (typeof n !== "number" || n < 0) return "—";
+  return n.toLocaleString("en-US");
+}
+
+function productCountStr(L) {
+  const pc = L.product_count;
+  return (typeof pc === "number" && pc >= 0) ? String(pc) : "your online catalog";
+}
+
+// One plain-English line explaining why this lead matters.
+function whyLine(L) {
+  const bits = [];
+  if (L.status === "no_app") bits.push("No app");
+  else if (L.status === "has_app") {
+    const age = appAgeDays(L);
+    bits.push(age != null ? `App ${humanAge(age)} old` : "Has app");
+  } else bits.push("App status unknown");
+  if (typeof L.product_count === "number" && L.product_count >= 0)
+    bits.push(`${fmtCount(L.product_count)} products`);
+  const reach = [];
+  if (hasPersonal(L)) reach.push("personal email");
+  else if ((L.emails || []).length) reach.push("email");
+  if (hasWa(L)) reach.push("WhatsApp");
+  else if ((L.phones || []).length) reach.push("phone");
+  if (reach.length) bits.push(reach.join(" + "));
+  return bits.join(" · ");
+}
+
+function followupState(domain) {
+  const e = pipeOf(domain);
+  if (!e?.followup) return "";
+  return e.followup < new Date().toISOString().slice(0, 10) ? "overdue" : "due";
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 // Crypto: PBKDF2 + AES-GCM, mirroring src/encrypt_dashboard.py
@@ -143,6 +236,7 @@ async function decryptEnvelope(envelope, passphrase) {
 // ──────────────────────────────────────────────────────────────────────────
 
 async function init() {
+  migratePersonal();
   applyTheme(ls.get(LS_KEYS.theme, prefersDark() ? "dark" : "light"));
   hookGlobalUI();
   hookSettingsUI();
@@ -236,15 +330,16 @@ document.getElementById("auth-form").addEventListener("submit", async (e) => {
 
 function renderStats() {
   const c = state.data.counts || {};
+  const stages = Object.values(ls.get(LS_KEYS.pipeline, {})).map(e => e.stage);
+  const fresh = (state.data.leads || []).filter(L => !stageOf(L.domain) && !isHidden(L.domain)).length;
   const cards = [
     ["Total", c.total || 0],
     ["A-tier", c.A || 0, "tier-A"],
-    ["B-tier", c.B || 0, "tier-B"],
-    ["C-tier", c.C || 0, "tier-C"],
     ["No app", c.no_app || 0, "status-no_app"],
     ["Has app", c.has_app || 0, "status-has_app"],
-    ["Unknown", c.app_unknown || 0, "status-app_unknown"],
-    ["Contacted", Object.keys(ls.get(LS_KEYS.contacted, {})).length],
+    ["New", fresh],
+    ["Active", stages.filter(s => ACTIVE_STAGES.has(s)).length],
+    ["Won", stages.filter(s => s === "won").length],
   ];
   const html = cards.map(([label, value, badge]) => `
     <div class="stat-card">
@@ -260,20 +355,29 @@ function renderStats() {
 // ──────────────────────────────────────────────────────────────────────────
 
 function applyFiltersAndSort() {
-  const contacted = ls.get(LS_KEYS.contacted, {});
+  const pipe = ls.get(LS_KEYS.pipeline, {});
   const q = state.filters.search.trim().toLowerCase();
   let rows = (state.data.leads || []).slice();
 
   rows = rows.filter(L => {
+    if (isHidden(L.domain)) return false;
     if (state.filters.platform !== "all" && L.platform !== state.filters.platform) return false;
     if (state.filters.tier !== "all" && L.lead_tier !== state.filters.tier) return false;
     if (state.filters.status !== "all" && L.status !== state.filters.status) return false;
-    const c = contacted[L.domain]?.status || "uncontacted";
-    if (state.filters.contact === "contacted" && c !== "contacted") return false;
-    if (state.filters.contact === "uncontacted" && c !== "uncontacted") return false;
-    if (state.filters.contact === "not_interested" && c !== "not_interested") return false;
+    const stage = pipe[L.domain]?.stage || "";
+    const cf = state.filters.contact;
+    if (cf === "uncontacted" && stage) return false;
+    if (cf === "active" && !ACTIVE_STAGES.has(stage)) return false;
+    if (cf === "won" && stage !== "won") return false;
+    if (cf === "lost" && stage !== "lost") return false;
+    const rf = state.filters.reach || "all";
+    if (rf === "personal" && !hasPersonal(L)) return false;
+    if (rf === "whatsapp" && !hasWa(L)) return false;
+    if (rf === "any" && !hasAnyContact(L)) return false;
+    if (rf === "none" && hasAnyContact(L)) return false;
     if (q) {
-      const hay = (L.domain + " " + (L.store_name || "")).toLowerCase();
+      const hay = (L.domain + " " + (L.store_name || "") + " " +
+        (L.emails || []).map(e => e.address).join(" ")).toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -283,12 +387,18 @@ function applyFiltersAndSort() {
   const mul = dir === "asc" ? 1 : -1;
   rows.sort((a, b) => {
     let av, bv;
-    if (key === "app_age") {
+    if (key === "priority") {
+      av = priorityOf(a);
+      bv = priorityOf(b);
+    } else if (key === "product_count") {
+      av = (typeof a.product_count === "number" && a.product_count >= 0) ? a.product_count : -1;
+      bv = (typeof b.product_count === "number" && b.product_count >= 0) ? b.product_count : -1;
+    } else if (key === "app_age") {
       av = appAgeDays(a) ?? Infinity;
       bv = appAgeDays(b) ?? Infinity;
     } else if (key === "contacted") {
-      av = contacted[a.domain]?.at || "";
-      bv = contacted[b.domain]?.at || "";
+      av = pipe[a.domain]?.at || "";
+      bv = pipe[b.domain]?.at || "";
     } else {
       av = a[key]; bv = b[key];
     }
@@ -298,12 +408,16 @@ function applyFiltersAndSort() {
     return String(av).localeCompare(String(bv)) * mul;
   });
 
+  if (state.filters.focus) {
+    rows = rows.filter(L => !pipe[L.domain]?.stage && hasAnyContact(L)).slice(0, 10);
+  }
+
   state.filtered = rows;
 }
 
 function renderTable() {
   applyFiltersAndSort();
-  const contacted = ls.get(LS_KEYS.contacted, {});
+  const pipe = ls.get(LS_KEYS.pipeline, {});
   const tbody = document.getElementById("leads-body");
   const empty = document.getElementById("empty-state");
 
@@ -312,11 +426,14 @@ function renderTable() {
     empty.hidden = false;
   } else {
     empty.hidden = true;
-    tbody.innerHTML = state.filtered.map((L, i) => renderRow(L, i, contacted[L.domain])).join("");
+    tbody.innerHTML = state.filtered.map((L, i) => renderRow(L, i, pipe[L.domain])).join("");
   }
 
+  const hiddenN = Object.keys(ls.get(LS_KEYS.hidden, {})).length;
   document.getElementById("footer-counts").textContent =
-    `${state.filtered.length} of ${state.data.counts?.total || 0} leads shown`;
+    `${state.filtered.length} of ${state.data.counts?.total || 0} leads shown` +
+    (state.filters.focus ? " · ★ focus top 10" : "") +
+    (hiddenN ? ` · ${hiddenN} dismissed` : "");
 
   // Re-attach handlers
   tbody.querySelectorAll("tr.lead-row").forEach(tr => {
@@ -350,7 +467,7 @@ function renderTable() {
   });
 }
 
-function renderRow(L, idx, contact) {
+function renderRow(L, idx, pipeEntry) {
   const tier = L.lead_tier || "?";
   const score = L.lead_score ?? "?";
   const status = L.status || "?";
@@ -359,14 +476,17 @@ function renderRow(L, idx, contact) {
   const reasons = (L.score_reasons || []).slice(0, 3).map(r =>
     `<span class="reason-tag">${escapeHtml(r)}</span>`
   ).join("");
-  const contactStatus = contact?.status || "";
-  const contactLabel = contactStatus === "contacted" ? "Contacted"
-                     : contactStatus === "not_interested" ? "Not interested"
-                     : "—";
+  const stage = pipeEntry?.stage || "";
+  const fu = pipeEntry?.followup || "";
+  const fuCls = followupState(L.domain);
+  const pipeCell = stage || fu
+    ? (stage ? `<span class="stage-tag stage-${stage}">${STAGE_LABELS[stage]}</span>` : "") +
+      (fu ? ` <span class="due ${fuCls}" title="Follow up ${escapeHtml(fu)}">↺ ${escapeHtml(fu.slice(5))}</span>` : "")
+    : "—";
 
   const rowClass = ["lead-row"];
   if (idx === state.selectedIndex) rowClass.push("selected");
-  if (contactStatus) rowClass.push(contactStatus);
+  if (stage) rowClass.push("stage-" + stage);
 
   // Reach: top extracted email + whatsapp/phone
   const emails = L.emails || [];
@@ -393,11 +513,12 @@ function renderRow(L, idx, contact) {
       <td data-label="Status"><span class="status-badge status-${status}">${humanStatus(status)}</span></td>
       <td data-label="Domain"><a href="https://${escapeHtml(L.domain)}" target="_blank" rel="noopener noreferrer">${escapeHtml(L.domain)}</a></td>
       <td data-label="Store">${escapeHtml(L.store_name || "")}</td>
+      <td class="col-value" data-label="Value">${fmtCount(L.product_count)}</td>
       <td class="col-reach" data-label="Reach">${reachCell}</td>
       <td data-label="App age">${ageStr}</td>
       <td data-label="Reasons"><div class="reasons">${reasons}</div></td>
       <td data-label="Last check">${escapeHtml(L.last_checked || "")}</td>
-      <td data-label="Contact"><span class="contact-tag ${contactStatus}">${contactLabel}</span></td>
+      <td data-label="Pipeline">${pipeCell}</td>
     </tr>
   `;
 }
@@ -415,7 +536,7 @@ function injectExpanded(rowEl) {
   expandedTr.className = "expanded-row";
   expandedTr.dataset.expandedFor = domain;
   const td = document.createElement("td");
-  td.colSpan = 10;
+  td.colSpan = 11;
   td.innerHTML = renderExpandedContent(lead);
   expandedTr.appendChild(td);
   rowEl.parentNode.insertBefore(expandedTr, rowEl.nextSibling);
@@ -426,15 +547,23 @@ function injectExpanded(rowEl) {
     const draft = root.querySelector(".email-draft").textContent;
     copyToClipboard(draft);
   });
-  root.querySelector("[data-action=mark-contacted]")?.addEventListener("click", () => {
-    setContactStatus(domain, "contacted");
+  root.querySelector("[data-action=copy-wa]")?.addEventListener("click", () => {
+    copyToClipboard(buildWhatsApp(lead));
   });
-  root.querySelector("[data-action=mark-not-interested]")?.addEventListener("click", () => {
-    setContactStatus(domain, "not_interested");
+  root.querySelectorAll("[data-action=stage]").forEach(btn => {
+    btn.addEventListener("click", () => setStage(domain, btn.dataset.stage));
   });
-  root.querySelector("[data-action=clear-contact]")?.addEventListener("click", () => {
-    setContactStatus(domain, null);
+  root.querySelector("[data-action=clear-stage]")?.addEventListener("click", () => {
+    setStage(domain, null);
   });
+  root.querySelector("[data-action=dismiss]")?.addEventListener("click", () => {
+    toggleHidden(domain);
+  });
+  const fuInput = root.querySelector("[data-action=followup]");
+  if (fuInput) {
+    fuInput.value = pipeOf(domain)?.followup || "";
+    fuInput.addEventListener("change", () => setFollowup(domain, fuInput.value));
+  }
   root.querySelector("[data-action=regen-template]")?.addEventListener("change", (e) => {
     const which = e.target.value;
     root.querySelector(".email-draft").textContent = buildEmail(lead, which);
@@ -482,6 +611,11 @@ function renderExpandedContent(L) {
 
   const which = L.status === "has_app" ? "hasApp" : "noApp";
   const draft = buildEmail(L, which);
+  const waDraft = buildWhatsApp(L);
+  const wa = (L.phones || []).find(p => p.channel === "whatsapp");
+  const waNum = wa ? wa.number.replace("+", "") : "";
+  const waLink = waNum ? `https://wa.me/${encodeURIComponent(waNum)}?text=${encodeURIComponent(waDraft)}` : "";
+  const email0 = (L.emails || [])[0]?.address || "";
 
   // Build contact-info block (emails + phones with role/channel badges).
   const emailsHtml = (L.emails || []).map(e =>
@@ -496,6 +630,7 @@ function renderExpandedContent(L) {
 
   return `
     <div class="expanded-content">
+      <div class="why-line">${escapeHtml(whyLine(L))}</div>
       <div class="expanded-grid">
         <div>
           <div class="detail-section">
@@ -504,7 +639,7 @@ function renderExpandedContent(L) {
               <dt>Domain</dt><dd>${escapeHtml(L.domain)}</dd>
               <dt>Store</dt><dd>${escapeHtml(L.store_name || "—")}</dd>
               <dt>Status</dt><dd>${humanStatus(L.status)}</dd>
-              <dt>Score</dt><dd>${L.lead_score ?? "?"} (${L.lead_tier ?? "?"})</dd>
+              <dt>Score</dt><dd>${L.lead_score ?? "?"} (${L.lead_tier ?? "?"}) · priority ${priorityOf(L)}</dd>
               <dt>First seen</dt><dd>${escapeHtml(L.first_seen || "—")}</dd>
               <dt>Last checked</dt><dd>${escapeHtml(L.last_checked || "—")}</dd>
               <dt>App age</dt><dd>${ageDays != null ? humanAge(ageDays) : "—"}</dd>
@@ -540,15 +675,28 @@ function renderExpandedContent(L) {
             <pre class="email-draft">${escapeHtml(draft)}</pre>
             <div class="btn-row">
               <button data-action="copy-email" class="primary-btn">📋 Copy email</button>
+              ${email0 ? `<a href="${escapeHtml(mailtoHref(L))}" class="ghost-btn">✉️ Open mail</a>` : ""}
               <a href="https://${escapeHtml(L.domain)}" target="_blank" rel="noopener noreferrer" class="ghost-btn">↗ Open shop</a>
             </div>
           </div>
           <div class="detail-section">
-            <h4>Mark</h4>
+            <h4>WhatsApp</h4>
+            <pre class="wa-draft">${escapeHtml(waDraft)}</pre>
             <div class="btn-row">
-              <button data-action="mark-contacted" class="ghost-btn">✓ Contacted</button>
-              <button data-action="mark-not-interested" class="ghost-btn">✗ Not interested</button>
-              <button data-action="clear-contact" class="ghost-btn">↺ Reset</button>
+              <button data-action="copy-wa" class="primary-btn">📋 Copy WhatsApp</button>
+              ${waLink ? `<a href="${escapeHtml(waLink)}" target="_blank" rel="noopener noreferrer" class="ghost-btn">↗ Open chat</a>` : ""}
+            </div>
+          </div>
+          <div class="detail-section">
+            <h4>Pipeline</h4>
+            <div class="btn-row">
+              ${Object.entries(STAGE_LABELS).map(([s, label]) =>
+                `<button data-action="stage" data-stage="${s}" class="ghost-btn${stageOf(L.domain) === s ? " active-stage" : ""}">${label}</button>`).join("")}
+              <button data-action="clear-stage" class="ghost-btn">↺ Reset</button>
+            </div>
+            <div class="followup-row">
+              <label class="muted small">Follow up <input type="date" data-action="followup"></label>
+              <button data-action="dismiss" class="ghost-btn">Hide lead</button>
             </div>
           </div>
           <div class="detail-section">
@@ -596,22 +744,72 @@ function buildEmail(lead, which /* "noApp" | "hasApp" */) {
     .replaceAll("{{domain}}", lead.domain)
     .replaceAll("{{app_age}}", ageStr)
     .replaceAll("{{app_age_year}}", ageYear)
+    .replaceAll("{{product_count}}", productCountStr(lead))
+    .replaceAll("{{app_name}}", ((lead.app_matches || [])[0]?.name) || lead.store_name || lead.domain)
     .replaceAll("{{signature}}", sig)
     .replaceAll("{{portfolio_url}}", portfolio)
     .replaceAll("{{ios_url}}", ios)
     .replaceAll("{{android_url}}", android);
 }
 
+function buildWhatsApp(lead) {
+  const tpl = ls.get(LS_KEYS.templateWa, DEFAULT_TEMPLATES.whatsapp);
+  const sig = ls.get(LS_KEYS.templateSig, DEFAULT_TEMPLATES.sig);
+  const ageDays = appAgeDays(lead);
+  const ageStr = ageDays != null ? humanAge(ageDays) : "some time ago";
+  return tpl
+    .replaceAll("{{store_name}}", lead.store_name || lead.domain)
+    .replaceAll("{{domain}}", lead.domain)
+    .replaceAll("{{app_age}}", ageStr)
+    .replaceAll("{{product_count}}", productCountStr(lead))
+    .replaceAll("{{app_name}}", ((lead.app_matches || [])[0]?.name) || lead.store_name || lead.domain)
+    .replaceAll("{{signature}}", sig);
+}
+
+function mailtoHref(lead) {
+  const email0 = (lead.emails || [])[0]?.address || "";
+  const full = buildEmail(lead, lead.status === "has_app" ? "hasApp" : "noApp");
+  const m = full.match(/^Subject:\s*(.*)$/m);
+  const subject = m ? m[1] : `A mobile app for ${lead.store_name || lead.domain}`;
+  const body = full.replace(/^Subject:.*\n/, "");
+  return `mailto:${encodeURIComponent(email0)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Personal state mutations
 // ──────────────────────────────────────────────────────────────────────────
 
-function setContactStatus(domain, status /* "contacted" | "not_interested" | null */) {
-  const all = ls.get(LS_KEYS.contacted, {});
-  if (status == null) delete all[domain];
-  else all[domain] = { status, at: new Date().toISOString().slice(0, 10) };
-  ls.set(LS_KEYS.contacted, all);
-  toast(status ? `Marked ${status.replace("_", " ")}` : "Reset contact status");
+function setStage(domain, stage /* "contacted"|"replied"|"meeting"|"won"|"lost"|null */) {
+  const all = ls.get(LS_KEYS.pipeline, {});
+  if (stage == null) delete all[domain];
+  else all[domain] = { stage, at: new Date().toISOString().slice(0, 10), followup: all[domain]?.followup || "" };
+  ls.set(LS_KEYS.pipeline, all);
+  toast(stage ? `Marked ${STAGE_LABELS[stage].toLowerCase()}` : "Reset pipeline stage");
+  renderStats();
+  renderTable();
+}
+
+function setFollowup(domain, dateStr) {
+  const all = ls.get(LS_KEYS.pipeline, {});
+  const cur = all[domain] || { stage: "", at: "" };
+  cur.followup = dateStr || "";
+  all[domain] = cur;
+  ls.set(LS_KEYS.pipeline, all);
+  toast(dateStr ? `Follow-up ${dateStr}` : "Follow-up cleared");
+  renderStats();
+  renderTable();
+}
+
+function toggleHidden(domain) {
+  const all = ls.get(LS_KEYS.hidden, {});
+  if (all[domain]) delete all[domain];
+  else all[domain] = true;
+  ls.set(LS_KEYS.hidden, all);
+  if (state.expandedDomain === domain) {
+    document.querySelector("tr.expanded-row")?.remove();
+    state.expandedDomain = null;
+  }
+  toast(all[domain] ? "Lead dismissed" : "Lead restored");
   renderStats();
   renderTable();
 }
@@ -673,6 +871,14 @@ function hookGlobalUI() {
   // Export filtered as CSV
   document.getElementById("btn-export").addEventListener("click", exportFilteredCsv);
 
+  // Focus: top-10 queue
+  document.getElementById("btn-focus").addEventListener("click", (e) => {
+    state.filters.focus = !state.filters.focus;
+    e.currentTarget.classList.toggle("on", state.filters.focus);
+    saveFilters();
+    renderTable();
+  });
+
   // Keyboard shortcuts
   document.addEventListener("keydown", onKey);
 }
@@ -711,6 +917,7 @@ function restoreFiltersAndSort() {
     (target || group.querySelector(".chip[data-value=all]")).classList.add("active");
   });
   document.getElementById("search").value = state.filters.search || "";
+  document.getElementById("btn-focus").classList.toggle("on", !!state.filters.focus);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -727,12 +934,21 @@ function hookSettingsUI() {
   document.getElementById("btn-export-personal").addEventListener("click", exportPersonal);
   document.getElementById("import-personal").addEventListener("change", importPersonal);
   document.getElementById("btn-clear-personal").addEventListener("click", () => {
-    if (!confirm("Erase all contacted flags and notes? This can't be undone.")) return;
+    if (!confirm("Erase all pipeline stages, dismissed leads, and notes? This can't be undone.")) return;
+    ls.del(LS_KEYS.pipeline);
     ls.del(LS_KEYS.contacted);
+    ls.del(LS_KEYS.hidden);
     ls.del(LS_KEYS.notes);
     renderStats();
     renderTable();
     toast("Personal data cleared");
+  });
+  document.getElementById("btn-restore-hidden").addEventListener("click", () => {
+    ls.del(LS_KEYS.hidden);
+    renderStats();
+    renderTable();
+    openSettings();
+    toast("Dismissed leads restored");
   });
   document.getElementById("btn-clear-cache").addEventListener("click", () => {
     if (!confirm("Forget the passphrase and reload?")) return;
@@ -746,16 +962,21 @@ function openSettings() {
     ls.get(LS_KEYS.templateNoApp, DEFAULT_TEMPLATES.noApp);
   document.getElementById("tpl-has-app").value =
     ls.get(LS_KEYS.templateHasApp, DEFAULT_TEMPLATES.hasApp);
+  document.getElementById("tpl-whatsapp").value =
+    ls.get(LS_KEYS.templateWa, DEFAULT_TEMPLATES.whatsapp);
   document.getElementById("tpl-signature").value =
     ls.get(LS_KEYS.templateSig, DEFAULT_TEMPLATES.sig);
   document.getElementById("tpl-portfolio").value =
     ls.get(LS_KEYS.templatePortfolio, DEFAULT_TEMPLATES.portfolio);
+  const hiddenN = Object.keys(ls.get(LS_KEYS.hidden, {})).length;
+  document.getElementById("btn-restore-hidden").textContent = `Restore dismissed (${hiddenN})`;
   document.getElementById("settings-modal").hidden = false;
 }
 
 function saveSettings() {
   ls.set(LS_KEYS.templateNoApp, document.getElementById("tpl-no-app").value);
   ls.set(LS_KEYS.templateHasApp, document.getElementById("tpl-has-app").value);
+  ls.set(LS_KEYS.templateWa, document.getElementById("tpl-whatsapp").value);
   ls.set(LS_KEYS.templateSig, document.getElementById("tpl-signature").value);
   ls.set(LS_KEYS.templatePortfolio, document.getElementById("tpl-portfolio").value);
   document.getElementById("settings-modal").hidden = true;
@@ -769,13 +990,16 @@ function saveSettings() {
 
 function exportPersonal() {
   const blob = {
-    schema: 1,
+    schema: 2,
     exported_at: new Date().toISOString(),
+    pipeline: ls.get(LS_KEYS.pipeline, {}),
     contacted: ls.get(LS_KEYS.contacted, {}),
+    hidden: ls.get(LS_KEYS.hidden, {}),
     notes: ls.get(LS_KEYS.notes, {}),
     templates: {
       noApp: ls.get(LS_KEYS.templateNoApp),
       hasApp: ls.get(LS_KEYS.templateHasApp),
+      whatsapp: ls.get(LS_KEYS.templateWa),
       sig: ls.get(LS_KEYS.templateSig),
       portfolio: ls.get(LS_KEYS.templatePortfolio),
     },
@@ -790,12 +1014,16 @@ async function importPersonal(e) {
   try {
     const text = await file.text();
     const blob = JSON.parse(text);
-    if (blob.contacted) ls.set(LS_KEYS.contacted, blob.contacted);
+    if (blob.pipeline) ls.set(LS_KEYS.pipeline, blob.pipeline);
+    else if (blob.contacted) ls.set(LS_KEYS.contacted, blob.contacted);
+    if (blob.hidden) ls.set(LS_KEYS.hidden, blob.hidden);
     if (blob.notes) ls.set(LS_KEYS.notes, blob.notes);
     if (blob.templates?.noApp) ls.set(LS_KEYS.templateNoApp, blob.templates.noApp);
     if (blob.templates?.hasApp) ls.set(LS_KEYS.templateHasApp, blob.templates.hasApp);
+    if (blob.templates?.whatsapp) ls.set(LS_KEYS.templateWa, blob.templates.whatsapp);
     if (blob.templates?.sig) ls.set(LS_KEYS.templateSig, blob.templates.sig);
     if (blob.templates?.portfolio) ls.set(LS_KEYS.templatePortfolio, blob.templates.portfolio);
+    migratePersonal();
     renderStats();
     renderTable();
     toast("Personal data imported");
@@ -812,7 +1040,9 @@ async function importPersonal(e) {
 
 function exportFilteredCsv() {
   if (!state.filtered.length) { toast("Nothing to export"); return; }
-  const cols = ["lead_score", "lead_tier", "status", "domain", "store_name",
+  const pipe = ls.get(LS_KEYS.pipeline, {});
+  const cols = ["priority", "lead_score", "lead_tier", "status", "domain", "store_name",
+                "product_count", "emails", "phones", "stage", "followup",
                 "woo_score", "lb_score", "first_seen", "last_checked",
                 "ios_url", "android_url", "ios_updated", "android_updated"];
   const head = cols.join(",");
@@ -821,6 +1051,11 @@ function exportFilteredCsv() {
     const and = (L.app_matches || []).find(m => m.platform === "android") || {};
     const flat = {
       ...L,
+      priority: priorityOf(L),
+      emails: (L.emails || []).map(e => e.address).join(";"),
+      phones: (L.phones || []).map(p => p.number).join(";"),
+      stage: pipe[L.domain]?.stage || "",
+      followup: pipe[L.domain]?.followup || "",
       ios_url: ios.url || "", android_url: and.url || "",
       ios_updated: ios.last_updated || "", android_updated: and.last_updated || "",
     };
@@ -892,9 +1127,11 @@ function onKey(e) {
   if (state.selectedIndex < 0) return;
   const lead = state.filtered[state.selectedIndex];
   if (e.key === "c") {
-    setContactStatus(lead.domain, "contacted");
-  } else if (e.key === "n") {
-    setContactStatus(lead.domain, "not_interested");
+    setStage(lead.domain, "contacted");
+  } else if (e.key === "w") {
+    copyToClipboard(buildWhatsApp(lead));
+  } else if (e.key === "d") {
+    toggleHidden(lead.domain);
   } else if (e.key === "e") {
     copyToClipboard(buildEmail(lead, lead.status === "has_app" ? "hasApp" : "noApp"));
   }
