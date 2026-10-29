@@ -26,6 +26,14 @@
 
   <section id="filters">
     <div class="filter-row">
+      <span class="filter-label">View:</span>
+      <div class="filter-group" data-filter="view">
+        <button class="chip active" data-value="active">Outreach-ready</button>
+        <button class="chip" data-value="review">Needs review</button>
+        <button class="chip" data-value="archived">Archived</button>
+      </div>
+    </div>
+    <div class="filter-row">
       <span class="filter-label">Tier:</span>
       <div class="filter-group" data-filter="tier">
         <button class="chip active" data-value="all">All</button>
@@ -38,7 +46,7 @@
       <span class="filter-label">Status:</span>
       <div class="filter-group" data-filter="status">
         <button class="chip active" data-value="all">All</button>
-        <button class="chip" data-value="no_app">No app</button>
+        <button class="chip" data-value="no_app">No app found</button>
         <button class="chip" data-value="has_app">Has app</button>
         <button class="chip" data-value="app_unknown">Unknown</button>
       </div>
@@ -57,6 +65,7 @@
         <button class="chip active" data-value="all">All</button>
         <button class="chip" data-value="uncontacted">New</button>
         <button class="chip" data-value="active">Active</button>
+        <button class="chip" data-value="due">Follow-ups due</button>
         <button class="chip" data-value="won">Won</button>
         <button class="chip" data-value="lost">Lost</button>
       </div>
@@ -144,7 +153,8 @@
       <button class="icon-btn close-modal" data-close="settings-modal">✕</button>
     </header>
     <div class="modal-body">
-      <h3>Email template — no app (cold)</h3>
+      <h3>Email template — no app found / unknown</h3>
+      <p class="muted small">Review previously saved templates for old platform claims or performance promises. Unknown app status uses the neutral default draft.</p>
       <textarea id="tpl-no-app" rows="14"></textarea>
 
       <h3>Email template — has app (revamp)</h3>
@@ -166,11 +176,12 @@
         <code>{{product_count}}</code> <code>{{app_name}}</code>
         <code>{{signature}}</code> <code>{{portfolio_url}}</code>
         <code>{{ios_url}}</code> <code>{{android_url}}</code>
+        <code>{{platform}}</code> <code>{{app_observation}}</code>
       </p>
 
       <hr>
       <h3>Backup &amp; restore</h3>
-      <p class="muted small">Contacted flags and notes live in this browser only. Export to back up across devices.</p>
+      <p class="muted small">Pipeline, corrections, archive decisions, and notes live in this browser only. Export to back up across devices.</p>
       <div class="btn-row">
         <button id="btn-export-personal" class="ghost-btn">Export personal data (JSON)</button>
         <label class="ghost-btn">

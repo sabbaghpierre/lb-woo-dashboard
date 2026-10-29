@@ -21,6 +21,7 @@ const LS_KEYS = {
   contacted: "lbwt:contacted",            // legacy, migrated into pipeline on load
   pipeline: "lbwt:pipeline",              // { domain: { stage, at: iso-date, followup: iso-date|"" } }
   hidden: "lbwt:hidden",                  // { domain: true } dismissed leads
+  overrides: "lbwt:overrides",
   notes: "lbwt:notes",                  // { domain: "free text" }
   theme: "lbwt:theme",                  // "light" | "dark"
   templateNoApp: "lbwt:tpl:noApp",
@@ -38,16 +39,11 @@ const DEFAULT_TEMPLATES = {
 
 Hi,
 
-I came across {{store_name}} ({{domain}}) and noticed you don't yet have a mobile app on the App Store or Play Store.
+I came across {{store_name}} ({{domain}}). {{app_observation}}
 
-Because you're on WooCommerce, your existing store can power a native mobile app via the Woo REST API — no rebuild, no new backend. The catalog, cart, and checkout you already maintain become the data layer for the app. A working iOS + Android app on top of an existing Woo store typically takes 3-4 weeks to ship instead of the 4-6 months a from-scratch build would take.
+I'm a Lebanon-based mobile developer. I'd like to explore whether an app connected to your {{platform}} store could make repeat shopping easier, with features such as restock notifications.
 
-A native app on the stores would let you:
-  • Send push notifications for restocks, sales, and new arrivals (5-10× the open-rate of email)
-  • Skip the mobile-web checkout friction (often a 20-40% lift in completion)
-  • Build a direct channel that doesn't depend on Meta or Google ads
-
-I'm based in Lebanon and would love to put together a quick proposal — including a clickable prototype matching your branding — at no cost. Would Tuesday or Wednesday work for a 20-minute call?
+Would a short conversation about your store's needs be useful?
 
 {{signature}}
 {{portfolio_url}}`,
@@ -56,13 +52,11 @@ I'm based in Lebanon and would love to put together a quick proposal — includi
 
 Hi,
 
-I'm a Lebanon-based mobile developer. I came across the {{store_name}} app on the stores and noticed it was last updated {{app_age}}.
+I'm a Lebanon-based mobile developer. {{app_observation}}
 
-Both Apple and Google have shipped major guideline changes since {{app_age_year}}, and modern shoppers expect things that weren't standard back then — fast checkout, dark mode, modern push notifications, accessibility improvements. Stale apps tend to drop in store ranking too, so the cost of leaving an aging build untouched grows over time.
+I work on apps connected to {{platform}} stores and would be interested in understanding whether there are improvements your customers need. An older release alone doesn't tell me how well your app works.
 
-Because {{store_name}} runs on WooCommerce, I can rebuild on top of your existing store via the Woo REST API — no migration, no data copy. Most refreshes I do ship in 3-4 weeks.
-
-Would Tuesday or Wednesday work for a 20-minute call? I'll come prepared with a concrete walkthrough of what would change for {{store_name}} specifically.
+Would you be open to a short conversation about your mobile shopping experience?
 
 {{signature}}
 {{portfolio_url}}
@@ -71,14 +65,14 @@ Would Tuesday or Wednesday work for a 20-minute call? I'll come prepared with a 
   sig: "Pierre Sabbagh",
   portfolio: "https://sabbaghpierre.github.io",
   whatsapp:
-`Hi {{store_name}} — I'm a Lebanon-based mobile developer working with Lebanese shops like {{domain}}. I'd love to put together a free app demo for you this week — worth a 20-min call Tue/Wed? {{signature}}`,
+`Hi {{store_name}} — I'm a Lebanon-based mobile developer. Would you be the right person to discuss a mobile shopping app for {{domain}}? {{signature}}`,
 };
 
 const state = {
   envelope: null,        // raw envelope from leads.encrypted.json
   data: null,            // decrypted: { schema_version, generated_at, counts, leads }
   filtered: [],          // current filter+sort view
-  filters: { tier: "all", status: "all", contact: "all", platform: "all", reach: "all", focus: false, search: "" },
+  filters: { view: "active", tier: "all", status: "all", contact: "all", platform: "all", reach: "all", focus: false, search: "" },
   sort: { key: "priority", dir: "desc" },
   selectedIndex: -1,
   expandedDomain: null,
@@ -138,18 +132,16 @@ function isHidden(domain) {
 function hasPersonal(L) { return (L.emails || []).some(e => e.role === "personal"); }
 function hasWa(L) { return (L.phones || []).some(p => p.channel === "whatsapp"); }
 function hasAnyContact(L) { return (L.emails || []).length > 0 || (L.phones || []).length > 0; }
+function isArchived(L) { return L.lifecycle === "archived" || isHidden(L.domain); }
+function effectiveLeads() {
+  const overrides = ls.get(LS_KEYS.overrides, {});
+  return (state.data?.leads || []).map(L => ({ ...L, ...overrides[L.domain] }));
+}
+function leadOf(domain) { return effectiveLeads().find(L => L.domain === domain); }
 
 // Priority: lead score + catalog value + reachability. Decides the daily order.
 function priorityOf(L) {
-  let p = L.lead_score || 0;
-  const pc = L.product_count;
-  if (pc >= 100) p += 5;
-  else if (pc >= 21) p += 3;
-  else if (pc >= 1) p += 1;
-  if (hasPersonal(L)) p += 3;
-  else if (hasAnyContact(L)) p += 1;
-  if (hasWa(L)) p += 2;
-  return p;
+  return L.lead_score || 0;
 }
 
 function fmtCount(n) {
@@ -165,7 +157,7 @@ function productCountStr(L) {
 // One plain-English line explaining why this lead matters.
 function whyLine(L) {
   const bits = [];
-  if (L.status === "no_app") bits.push("No app");
+  if (L.status === "no_app") bits.push("No app found");
   else if (L.status === "has_app") {
     const age = appAgeDays(L);
     bits.push(age != null ? `App ${humanAge(age)} old` : "Has app");
@@ -184,7 +176,8 @@ function whyLine(L) {
 function followupState(domain) {
   const e = pipeOf(domain);
   if (!e?.followup) return "";
-  return e.followup < new Date().toISOString().slice(0, 10) ? "overdue" : "due";
+  const today = new Date().toISOString().slice(0, 10);
+  return e.followup < today ? "overdue" : e.followup === today ? "due" : "future";
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -329,19 +322,22 @@ document.getElementById("auth-form").addEventListener("submit", async (e) => {
 // ──────────────────────────────────────────────────────────────────────────
 
 function renderStats() {
-  const c = state.data.counts || {};
   const stages = Object.values(ls.get(LS_KEYS.pipeline, {})).map(e => e.stage);
-  const fresh = (state.data.leads || []).filter(L => !stageOf(L.domain) && !isHidden(L.domain)).length;
+  const leads = effectiveLeads();
+  const ready = leads.filter(L => !isArchived(L) && !L.review_required);
+  const fresh = leads.filter(L => !stageOf(L.domain) && !isArchived(L) && !L.review_required).length;
   const cards = [
-    ["Total", c.total || 0],
-    ["A-tier", c.A || 0, "tier-A"],
-    ["No app", c.no_app || 0, "status-no_app"],
-    ["Has app", c.has_app || 0, "status-has_app"],
+    ["Total", leads.length],
+    ["A-tier", ready.filter(L => L.lead_tier === "A").length],
+    ["No app found", ready.filter(L => L.status === "no_app").length],
+    ["Has app", ready.filter(L => L.status === "has_app").length],
     ["New", fresh],
     ["Active", stages.filter(s => ACTIVE_STAGES.has(s)).length],
     ["Won", stages.filter(s => s === "won").length],
+    ["Review", leads.filter(L => L.review_required && !isArchived(L)).length],
+    ["Archived", leads.filter(isArchived).length],
   ];
-  const html = cards.map(([label, value, badge]) => `
+  const html = cards.map(([label, value]) => `
     <div class="stat-card">
       <div class="label">${label}</div>
       <div class="value">${value}</div>
@@ -357,10 +353,16 @@ function renderStats() {
 function applyFiltersAndSort() {
   const pipe = ls.get(LS_KEYS.pipeline, {});
   const q = state.filters.search.trim().toLowerCase();
-  let rows = (state.data.leads || []).slice();
+  let rows = effectiveLeads();
 
   rows = rows.filter(L => {
-    if (isHidden(L.domain)) return false;
+    if (state.filters.view === "archived") {
+      if (!isArchived(L)) return false;
+    } else {
+      if (isArchived(L)) return false;
+      if (state.filters.view === "review" && !L.review_required) return false;
+      if (state.filters.view === "active" && L.review_required) return false;
+    }
     if (state.filters.platform !== "all" && L.platform !== state.filters.platform) return false;
     if (state.filters.tier !== "all" && L.lead_tier !== state.filters.tier) return false;
     if (state.filters.status !== "all" && L.status !== state.filters.status) return false;
@@ -370,6 +372,7 @@ function applyFiltersAndSort() {
     if (cf === "active" && !ACTIVE_STAGES.has(stage)) return false;
     if (cf === "won" && stage !== "won") return false;
     if (cf === "lost" && stage !== "lost") return false;
+    if (cf === "due" && (!ACTIVE_STAGES.has(stage) || !["due", "overdue"].includes(followupState(L.domain)))) return false;
     const rf = state.filters.reach || "all";
     if (rf === "personal" && !hasPersonal(L)) return false;
     if (rf === "whatsapp" && !hasWa(L)) return false;
@@ -394,8 +397,8 @@ function applyFiltersAndSort() {
       av = (typeof a.product_count === "number" && a.product_count >= 0) ? a.product_count : -1;
       bv = (typeof b.product_count === "number" && b.product_count >= 0) ? b.product_count : -1;
     } else if (key === "app_age") {
-      av = appAgeDays(a) ?? Infinity;
-      bv = appAgeDays(b) ?? Infinity;
+      av = appAgeDays(a) ?? -1;
+      bv = appAgeDays(b) ?? -1;
     } else if (key === "contacted") {
       av = pipe[a.domain]?.at || "";
       bv = pipe[b.domain]?.at || "";
@@ -409,7 +412,7 @@ function applyFiltersAndSort() {
   });
 
   if (state.filters.focus) {
-    rows = rows.filter(L => !pipe[L.domain]?.stage && hasAnyContact(L)).slice(0, 10);
+    rows = rows.filter(L => !pipe[L.domain]?.stage && !isArchived(L) && !L.review_required && hasAnyContact(L)).slice(0, 10);
   }
 
   state.filtered = rows;
@@ -513,7 +516,7 @@ function renderRow(L, idx, pipeEntry) {
       <td data-label="Status"><span class="status-badge status-${status}">${humanStatus(status)}</span></td>
       <td data-label="Domain"><a href="https://${escapeHtml(L.domain)}" target="_blank" rel="noopener noreferrer">${escapeHtml(L.domain)}</a></td>
       <td data-label="Store">${escapeHtml(L.store_name || "")}</td>
-      <td class="col-value" data-label="Value">${fmtCount(L.product_count)}</td>
+      <td class="col-value" data-label="Value">${fmtCount(L.product_count)}${L.product_count_kind === "lower_bound" ? "+" : ""}</td>
       <td class="col-reach" data-label="Reach">${reachCell}</td>
       <td data-label="App age">${ageStr}</td>
       <td data-label="Reasons"><div class="reasons">${reasons}</div></td>
@@ -529,7 +532,7 @@ function injectExpanded(rowEl) {
   if (existing) existing.remove();
 
   const domain = rowEl.dataset.domain;
-  const lead = state.data.leads.find(L => L.domain === domain);
+  const lead = leadOf(domain);
   if (!lead) return;
 
   const expandedTr = document.createElement("tr");
@@ -558,6 +561,22 @@ function injectExpanded(rowEl) {
   });
   root.querySelector("[data-action=dismiss]")?.addEventListener("click", () => {
     toggleHidden(domain);
+  });
+  root.querySelector("[data-action=restore]")?.addEventListener("click", () => {
+    const overrides = ls.get(LS_KEYS.overrides, {});
+    overrides[domain] = { ...overrides[domain], lifecycle: "active", archive_reason: "", review_required: true, reviewed_at: new Date().toISOString() };
+    ls.set(LS_KEYS.overrides, overrides);
+    const hidden = ls.get(LS_KEYS.hidden, {});
+    delete hidden[domain];
+    ls.set(LS_KEYS.hidden, hidden);
+    renderStats(); renderTable();
+  });
+  root.querySelector("[data-action=save-review]")?.addEventListener("click", () => saveReview(domain, root));
+  root.querySelector("[data-action=reset-review]")?.addEventListener("click", () => {
+    const overrides = ls.get(LS_KEYS.overrides, {});
+    delete overrides[domain];
+    ls.set(LS_KEYS.overrides, overrides);
+    renderStats(); renderTable();
   });
   const fuInput = root.querySelector("[data-action=followup]");
   if (fuInput) {
@@ -588,9 +607,7 @@ function renderExpandedContent(L) {
   const ageDays = appAgeDays(L);
   const components = Object.entries(L.score_components || {})
     .filter(([, v]) => v !== 0)
-    .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>+${v}</dd>`).join("");
-  const wooSignals = (L.woo_signals || []).map(s =>
-    `<span class="reason-tag">${escapeHtml(s)}</span>`).join(" ");
+    .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v >= 0 ? "+" : ""}${v}</dd>`).join("");
   const lbSignals = (L.lb_signals || []).map(s =>
     `<span class="reason-tag">${escapeHtml(s)}</span>`).join(" ");
 
@@ -616,6 +633,12 @@ function renderExpandedContent(L) {
   const waNum = wa ? wa.number.replace("+", "") : "";
   const waLink = waNum ? `https://wa.me/${encodeURIComponent(waNum)}?text=${encodeURIComponent(waDraft)}` : "";
   const email0 = (L.emails || [])[0]?.address || "";
+  const options = (values, selected) => values.map(([value, label]) =>
+    `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
+  const evidence = (L.location_evidence || []).map(e =>
+    `<p class="small"><a href="${escapeHtml(safeUrl(e.source_url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.signal)}</a>: ${escapeHtml(e.excerpt)} (${escapeHtml(e.observed_at || "")})</p>`).join("");
+  const coverage = Object.entries(L.app_coverage || {}).map(([p, result]) => `${p}: ${result}`).join(" · ") || "Not verified with current detector";
+  const candidates = (L.app_candidates || []).map(m => `<p class="small">Review ownership: <a href="${escapeHtml(safeUrl(m.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(m.name)}</a> · ${escapeHtml(m.developer)}</p>`).join("");
 
   // Build contact-info block (emails + phones with role/channel badges).
   const emailsHtml = (L.emails || []).map(e =>
@@ -642,6 +665,16 @@ function renderExpandedContent(L) {
               <dt>Score</dt><dd>${L.lead_score ?? "?"} (${L.lead_tier ?? "?"}) · priority ${priorityOf(L)}</dd>
               <dt>First seen</dt><dd>${escapeHtml(L.first_seen || "—")}</dd>
               <dt>Last checked</dt><dd>${escapeHtml(L.last_checked || "—")}</dd>
+              <dt>Last qualified</dt><dd>${escapeHtml(L.last_qualified || "—")}</dd>
+              <dt>Confidence</dt><dd>${escapeHtml(L.qualification_confidence || "low")}</dd>
+              <dt>Lifecycle</dt><dd>${escapeHtml(isHidden(L.domain) ? "manually dismissed" : L.lifecycle || "active")} ${escapeHtml(L.archive_reason || "")}</dd>
+              <dt>Location</dt><dd>${escapeHtml(L.location_relationship || "unknown")}</dd>
+              <dt>App coverage</dt><dd>${escapeHtml(coverage)} · ${escapeHtml(L.last_app_checked || "never")}</dd>
+              <dt>Observed hosts</dt><dd>${escapeHtml((L.observed_hosts || []).join(", "))}</dd>
+              ${L.duplicate_of ? `<dt>Shared destination</dt><dd>${escapeHtml(L.duplicate_of)} — review before contacting twice</dd>` : ""}
+              ${L.identity_note ? `<dt>Business identity</dt><dd>${escapeHtml(L.identity_note)}</dd>` : ""}
+              <dt>Sources</dt><dd>${escapeHtml((L.discovery_sources || []).join(", "))}</dd>
+              <dt>Search queries</dt><dd>${escapeHtml((L.discovery_queries || []).join("; "))}</dd>
               <dt>App age</dt><dd>${ageDays != null ? humanAge(ageDays) : "—"}</dd>
             </dl>
           </div>
@@ -650,8 +683,8 @@ function renderExpandedContent(L) {
             <dl>${components || "<dd>—</dd>"}</dl>
           </div>
           <div class="detail-section">
-            <h4>Woo signals (${L.woo_score ?? 0})</h4>
-            <div class="reasons">${wooSignals || "<span class=\"muted small\">—</span>"}</div>
+            <h4>Platform signals (${escapeHtml(L.platform || "unknown")})</h4>
+            <div class="reasons">${escapeHtml((L.platform_signals || L.woo_signals || []).join(", "))}</div>
           </div>
           <div class="detail-section">
             <h4>Lebanon signals (${L.lb_score ?? 0})</h4>
@@ -660,11 +693,29 @@ function renderExpandedContent(L) {
           <div class="detail-section">
             <h4>Apps</h4>
             ${apps}
+            ${candidates}
+            ${evidence}
+            ${L.business_evidence ? `<p class="small">Storefront observed ${escapeHtml(L.business_evidence.observed_at)}: ${escapeHtml(Object.keys(L.business_evidence.signals || {}).join(", "))}</p>` : ""}
+            ${L.closure_evidence ? `<p class="small">Closure evidence: ${escapeHtml(L.closure_evidence.excerpt)}</p>` : ""}
+            ${L.error ? `<p class="small">Last fetch: ${escapeHtml(L.error)}</p>` : ""}
           </div>
           ${reachBlock}
         </div>
 
         <div>
+          <div class="detail-section">
+            <h4>Manual review</h4>
+            <p class="muted small">Corrections stay in this browser and survive data refreshes. Export personal data to back them up. Changed facts clear the score; use automatic facts again to accept a refreshed score.</p>
+            <label>Platform <select data-review="platform">${options([["woo", "WooCommerce"], ["shopify", "Shopify"], ["", "Unknown"]], L.platform || "")}</select></label>
+            <label>App status <select data-review="status">${options([["app_unknown", "Unknown"], ["no_app", "No app found (reviewed)"], ["has_app", "Owned app (reviewed)"]], ["no_app", "has_app"].includes(L.status) ? L.status : "app_unknown")}</select></label>
+            <label>Location <select data-review="location">${options([["unknown", "Unknown"], ["local_contact", "Lebanon business/contact"], ["serves_lebanon", "Ships to Lebanon only"]], L.location_relationship === "likely_local" ? "local_contact" : L.location_relationship || "unknown")}</select></label>
+            <label>Emails <input data-review="emails" value="${escapeHtml((L.emails || []).map(e => e.address).join(", "))}"></label>
+            <label>Phones (+country code) <input data-review="phones" value="${escapeHtml((L.phones || []).map(p => p.number).join(", "))}"></label>
+            <label>Owned iOS app <input data-review="ios" value="${escapeHtml((L.app_matches || []).find(m => m.platform === "ios")?.url || "")}"></label>
+            <label>Owned Android app <input data-review="android" value="${escapeHtml((L.app_matches || []).find(m => m.platform === "android")?.url || "")}"></label>
+            <label>Reason / evidence <input data-review="reason" value="${escapeHtml(L.review_reason || "")}" placeholder="Required: what did you verify?"></label>
+            <div class="btn-row"><button data-action="save-review" class="ghost-btn">Save reviewed facts</button><button data-action="reset-review" class="ghost-btn">Use automatic facts</button></div>
+          </div>
           <div class="detail-section">
             <h4>Email draft
               <select data-action="regen-template" class="ghost-btn" style="float:right; font-size:11px;">
@@ -696,7 +747,8 @@ function renderExpandedContent(L) {
             </div>
             <div class="followup-row">
               <label class="muted small">Follow up <input type="date" data-action="followup"></label>
-              <button data-action="dismiss" class="ghost-btn">Hide lead</button>
+              <button data-action="dismiss" class="ghost-btn">${isHidden(L.domain) ? "Undo dismissal" : "Archive / dismiss"}</button>
+              ${isArchived(L) ? '<button data-action="restore" class="ghost-btn">Restore store</button>' : ""}
             </div>
           </div>
           <div class="detail-section">
@@ -725,7 +777,7 @@ function toggleExpand(domain) {
 // ──────────────────────────────────────────────────────────────────────────
 
 function buildEmail(lead, which /* "noApp" | "hasApp" */) {
-  const tpl = which === "hasApp"
+  const tpl = lead.status === "app_unknown" ? DEFAULT_TEMPLATES.noApp : which === "hasApp"
     ? ls.get(LS_KEYS.templateHasApp, DEFAULT_TEMPLATES.hasApp)
     : ls.get(LS_KEYS.templateNoApp, DEFAULT_TEMPLATES.noApp);
   const sig = ls.get(LS_KEYS.templateSig, DEFAULT_TEMPLATES.sig);
@@ -738,10 +790,17 @@ function buildEmail(lead, which /* "noApp" | "hasApp" */) {
     : "";
   const ios = (lead.app_matches || []).find(m => m.platform === "ios")?.url || "";
   const android = (lead.app_matches || []).find(m => m.platform === "android")?.url || "";
+  const observation = lead.status === "no_app"
+    ? "I couldn't find a confirmed iOS or Android app in my checks. Do you currently have one?"
+    : lead.status === "has_app"
+      ? "I found your store's app listing. " + (lead.app_matches || []).map(m => `${m.platform === "ios" ? "iOS" : "Android"}${m.last_updated ? `: listing updated ${m.last_updated}` : ": update date not confirmed"}`).join("; ") + "."
+      : "Do you currently offer a mobile app for your store?";
 
   return tpl
     .replaceAll("{{store_name}}", lead.store_name || lead.domain)
     .replaceAll("{{domain}}", lead.domain)
+    .replaceAll("{{platform}}", lead.platform === "woo" ? "WooCommerce" : lead.platform === "shopify" ? "Shopify" : "online")
+    .replaceAll("{{app_observation}}", observation)
     .replaceAll("{{app_age}}", ageStr)
     .replaceAll("{{app_age_year}}", ageYear)
     .replaceAll("{{product_count}}", productCountStr(lead))
@@ -782,7 +841,12 @@ function mailtoHref(lead) {
 function setStage(domain, stage /* "contacted"|"replied"|"meeting"|"won"|"lost"|null */) {
   const all = ls.get(LS_KEYS.pipeline, {});
   if (stage == null) delete all[domain];
-  else all[domain] = { stage, at: new Date().toISOString().slice(0, 10), followup: all[domain]?.followup || "" };
+  else {
+    const at = new Date().toISOString().slice(0, 10);
+    const reason = stage === "lost" ? prompt("Reason (optional)", all[domain]?.reason || "") : all[domain]?.reason || "";
+    all[domain] = { ...all[domain], stage, at, followup: all[domain]?.followup || "", reason: reason || "",
+      history: [...(all[domain]?.history || []), { stage, at, reason: reason || "" }] };
+  }
   ls.set(LS_KEYS.pipeline, all);
   toast(stage ? `Marked ${STAGE_LABELS[stage].toLowerCase()}` : "Reset pipeline stage");
   renderStats();
@@ -803,7 +867,11 @@ function setFollowup(domain, dateStr) {
 function toggleHidden(domain) {
   const all = ls.get(LS_KEYS.hidden, {});
   if (all[domain]) delete all[domain];
-  else all[domain] = true;
+  else {
+    const reason = prompt("Why archive this store?", "Not a fit");
+    if (reason == null) return;
+    all[domain] = { reason: reason.trim() || "Manually dismissed", at: new Date().toISOString() };
+  }
   ls.set(LS_KEYS.hidden, all);
   if (state.expandedDomain === domain) {
     document.querySelector("tr.expanded-row")?.remove();
@@ -812,6 +880,44 @@ function toggleHidden(domain) {
   toast(all[domain] ? "Lead dismissed" : "Lead restored");
   renderStats();
   renderTable();
+}
+
+function saveReview(domain, root) {
+  const lead = leadOf(domain);
+  const value = key => root.querySelector(`[data-review="${key}"]`).value.trim();
+  const reason = value("reason");
+  if (!reason) { toast("Add a review reason or evidence first"); return; }
+  const status = value("status");
+  const addresses = value("emails").split(",").map(s => s.trim()).filter(Boolean);
+  const numbers = value("phones").split(",").map(s => s.trim()).filter(Boolean);
+  if (addresses.some(s => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) || numbers.some(s => !/^\+\d{7,15}$/.test(s))) {
+    toast("Check email addresses and international phone numbers"); return;
+  }
+  const apps = [];
+  for (const platform of ["ios", "android"]) {
+    const url = value(platform);
+    if (!url) continue;
+    let host;
+    try { host = new URL(url).hostname; } catch { toast("Use a valid app-store URL"); return; }
+    if ((platform === "ios" && !["apps.apple.com", "itunes.apple.com"].includes(host)) || (platform === "android" && host !== "play.google.com") || !url.startsWith("https://")) {
+      toast("Use an official HTTPS app-store URL"); return;
+    }
+    const previous = (lead.app_matches || []).find(m => m.platform === platform && m.url === url);
+    apps.push(previous || { platform, url, name: lead.store_name || domain, confidence: "reviewed", evidence: reason });
+  }
+  if (status === "has_app" && !apps.length) { toast("Add an owned app link"); return; }
+  if (status !== "has_app" && apps.length) { toast("Clear owned app links or select owned app"); return; }
+  const overrides = ls.get(LS_KEYS.overrides, {});
+  overrides[domain] = { ...overrides[domain], platform: value("platform"), status,
+    has_app: status === "has_app" ? true : status === "no_app" ? false : null,
+    location_relationship: value("location"),
+    emails: addresses.map(address => (lead.emails || []).find(e => e.address === address) || { address, role: "unknown", source_url: "manual review" }),
+    phones: numbers.map(number => (lead.phones || []).find(p => p.number === number) || { number, channel: "phone", source_url: "manual review" }),
+    app_matches: apps, review_required: status === "app_unknown" || value("location") !== "local_contact" || !value("platform"),
+    review_reason: reason, reviewed_at: new Date().toISOString(), qualification_confidence: "reviewed",
+    lead_score: null, lead_tier: "?", score_components: {}, score_reasons: ["Manually corrected — automated score cleared"] };
+  ls.set(LS_KEYS.overrides, overrides);
+  toast("Reviewed facts saved locally"); renderStats(); renderTable();
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -939,6 +1045,7 @@ function hookSettingsUI() {
     ls.del(LS_KEYS.contacted);
     ls.del(LS_KEYS.hidden);
     ls.del(LS_KEYS.notes);
+    ls.del(LS_KEYS.overrides);
     renderStats();
     renderTable();
     toast("Personal data cleared");
@@ -995,6 +1102,7 @@ function exportPersonal() {
     pipeline: ls.get(LS_KEYS.pipeline, {}),
     contacted: ls.get(LS_KEYS.contacted, {}),
     hidden: ls.get(LS_KEYS.hidden, {}),
+    overrides: ls.get(LS_KEYS.overrides, {}),
     notes: ls.get(LS_KEYS.notes, {}),
     templates: {
       noApp: ls.get(LS_KEYS.templateNoApp),
@@ -1017,6 +1125,7 @@ async function importPersonal(e) {
     if (blob.pipeline) ls.set(LS_KEYS.pipeline, blob.pipeline);
     else if (blob.contacted) ls.set(LS_KEYS.contacted, blob.contacted);
     if (blob.hidden) ls.set(LS_KEYS.hidden, blob.hidden);
+    if (blob.overrides) ls.set(LS_KEYS.overrides, blob.overrides);
     if (blob.notes) ls.set(LS_KEYS.notes, blob.notes);
     if (blob.templates?.noApp) ls.set(LS_KEYS.templateNoApp, blob.templates.noApp);
     if (blob.templates?.hasApp) ls.set(LS_KEYS.templateHasApp, blob.templates.hasApp);
@@ -1041,7 +1150,7 @@ async function importPersonal(e) {
 function exportFilteredCsv() {
   if (!state.filtered.length) { toast("Nothing to export"); return; }
   const pipe = ls.get(LS_KEYS.pipeline, {});
-  const cols = ["priority", "lead_score", "lead_tier", "status", "domain", "store_name",
+  const cols = ["priority", "lead_score", "lead_tier", "status", "domain", "store_name", "platform", "qualification_confidence", "lifecycle", "archive_reason", "review_reason", "product_count_kind",
                 "product_count", "emails", "phones", "stage", "followup",
                 "woo_score", "lb_score", "first_seen", "last_checked",
                 "ios_url", "android_url", "ios_updated", "android_updated"];
@@ -1150,12 +1259,13 @@ function updateSelection() {
 // ──────────────────────────────────────────────────────────────────────────
 
 function appAgeDays(lead) {
-  const dates = (lead.app_matches || [])
-    .map(m => m.last_updated)
-    .filter(Boolean);
+  const newest = {};
+  for (const m of lead.app_matches || []) {
+    if (m.last_updated && (!newest[m.platform] || m.last_updated > newest[m.platform])) newest[m.platform] = m.last_updated;
+  }
+  const dates = Object.values(newest);
   if (!dates.length) return null;
-  const newest = dates.sort().slice(-1)[0];
-  const t = Date.parse(newest);
+  const t = Date.parse(dates.sort()[0]);
   if (isNaN(t)) return null;
   return Math.floor((Date.now() - t) / 86400000);
 }
@@ -1170,7 +1280,7 @@ function humanAge(days) {
 
 function humanStatus(s) {
   return ({
-    no_app: "no app", has_app: "has app", app_unknown: "unknown",
+    no_app: "no app found", has_app: "has app", app_unknown: "unknown",
   })[s] || s || "?";
 }
 
@@ -1226,6 +1336,11 @@ function escapeHtml(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+function safeUrl(value) {
+  try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) ? url.href : "#"; }
+  catch { return "#"; }
 }
 
 function cssEscape(s) {
