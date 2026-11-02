@@ -23,13 +23,28 @@
 
 <main id="main" hidden>
   <section id="stats" class="stats"></section>
+  <details class="dashboard-panel">
+    <summary>Crawler health &amp; discovery yield</summary>
+    <div id="crawler-health"></div>
+  </details>
+  <details class="dashboard-panel">
+    <summary>What changed? <span id="changes-count"></span></summary>
+    <p class="muted small">Meaningful crawler changes since you last marked them seen (last seven days initially). Up to 50 events are kept per store.</p>
+    <button id="btn-changes-seen" class="ghost-btn">Mark changes seen</button>
+    <div id="changes-list"></div>
+  </details>
+  <details class="dashboard-panel">
+    <summary>Outreach outcomes</summary>
+    <div id="outreach-outcomes"></div>
+  </details>
 
   <section id="filters">
     <div class="filter-row">
       <span class="filter-label">View:</span>
       <div class="filter-group" data-filter="view">
         <button class="chip active" data-value="active">Outreach-ready</button>
-        <button class="chip" data-value="review">Needs review</button>
+         <button class="chip" data-value="review">Needs review</button>
+         <button class="chip" data-value="changed">New / changed</button>
         <button class="chip" data-value="archived">Archived</button>
       </div>
     </div>
@@ -77,7 +92,8 @@
         <button class="chip" data-value="personal">Personal email</button>
         <button class="chip" data-value="whatsapp">WhatsApp</button>
         <button class="chip" data-value="any">Any contact</button>
-        <button class="chip" data-value="none">No contact</button>
+         <button class="chip" data-value="none">No contact</button>
+         <button class="chip" data-value="social">Social profile</button>
       </div>
     </div>
     <div class="filter-row">
@@ -101,7 +117,7 @@
           <th>Reach</th>
           <th data-sort="app_age" class="sortable">App age</th>
           <th>Reasons</th>
-          <th data-sort="last_checked" class="sortable">Last check</th>
+          <th data-sort="last_checked" class="sortable">Last attempt</th>
           <th data-sort="contacted" class="sortable">Pipeline</th>
         </tr>
       </thead>
@@ -176,7 +192,8 @@
         <code>{{product_count}}</code> <code>{{app_name}}</code>
         <code>{{signature}}</code> <code>{{portfolio_url}}</code>
         <code>{{ios_url}}</code> <code>{{android_url}}</code>
-        <code>{{platform}}</code> <code>{{app_observation}}</code>
+         <code>{{platform}}</code> <code>{{app_observation}}</code>
+         <code>{{opportunity}}</code>
       </p>
 
       <hr>

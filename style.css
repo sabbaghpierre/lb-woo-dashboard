@@ -87,6 +87,25 @@ main { max-width: 1400px; margin: 0 auto; padding: 16px 20px 60px; }
 .stat-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .stat-card .value { font-size: 22px; font-weight: 600; }
 
+.dashboard-panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px; margin-bottom: 12px; overflow-x: auto;
+}
+.dashboard-panel summary { cursor: pointer; font-weight: 600; }
+.dashboard-panel table { margin-top: 10px; font-size: 12px; }
+.dashboard-panel th { position: static; }
+.dashboard-panel tr { cursor: default; }
+.health-warning { color: var(--tier-b); }
+.freshness { display: block; font-size: 11px; white-space: normal; }
+.detail-section label { display: block; margin: 6px 0; font-size: 12px; }
+.detail-section input:not([type=date]), .detail-section select {
+  max-width: 100%; padding: 6px; background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.change-list { max-height: 320px; overflow-y: auto; padding-left: 20px; }
+.evidence-box { border-left: 3px solid var(--accent); padding: 6px 12px; margin-bottom: 12px; }
+.conflict-box { border-color: var(--tier-b); }
+
 /* Filters */
 #filters {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
@@ -226,7 +245,7 @@ tr.expanded-row:hover { background: var(--surface-2); }
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 10px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px; white-space: pre-wrap; max-height: 280px; overflow: auto;
-  margin-bottom: 6px;
+  margin-bottom: 6px; width: 100%; resize: vertical;
 }
 .notes-area {
   width: 100%; min-height: 70px; padding: 8px; border: 1px solid var(--border);

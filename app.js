@@ -31,6 +31,8 @@ const LS_KEYS = {
   templatePortfolio: "lbwt:tpl:portfolio",
   filters: "lbwt:filters",
   sort: "lbwt:sort",
+  businesses: "lbwt:businesses",
+  changesSeen: "lbwt:changesSeen",
 };
 
 const DEFAULT_TEMPLATES = {
@@ -66,6 +68,19 @@ Would you be open to a short conversation about your mobile shopping experience?
   portfolio: "https://sabbaghpierre.github.io",
   whatsapp:
 `Hi {{store_name}} — I'm a Lebanon-based mobile developer. Would you be the right person to discuss a mobile shopping app for {{domain}}? {{signature}}`,
+  opportunity:
+`Subject: Mobile shopping for {{store_name}}
+
+Hi,
+
+I'm a Lebanon-based mobile developer. {{app_observation}}
+
+{{opportunity}}
+
+Would a short conversation about your store's needs be useful?
+
+{{signature}}
+{{portfolio_url}}`,
 };
 
 const state = {
@@ -121,7 +136,7 @@ function migratePersonal() {
 }
 
 function pipeOf(domain) {
-  return ls.get(LS_KEYS.pipeline, {})[domain] || null;
+  return ls.get(LS_KEYS.pipeline, {})[businessOf(domain)] || null;
 }
 function stageOf(domain) {
   return pipeOf(domain)?.stage || "";
@@ -133,9 +148,54 @@ function hasPersonal(L) { return (L.emails || []).some(e => e.role === "personal
 function hasWa(L) { return (L.phones || []).some(p => p.channel === "whatsapp"); }
 function hasAnyContact(L) { return (L.emails || []).length > 0 || (L.phones || []).length > 0; }
 function isArchived(L) { return L.lifecycle === "archived" || isHidden(L.domain); }
+function businessOf(domain) {
+  const links = ls.get(LS_KEYS.businesses, {});
+  const visited = new Set();
+  while (links[domain] && !visited.has(domain)) {
+    visited.add(domain);
+    domain = links[domain];
+  }
+  return domain;
+}
+
+function reviewFacts(L) {
+  const sorted = values => [...new Set(values)].sort();
+  return {
+    platform: L.platform || "", status: L.status,
+    location_relationship: L.location_relationship || "unknown",
+    lifecycle: L.lifecycle || "active", archive_reason: L.archive_reason || "",
+    emails: sorted((L.emails || []).map(e => e.address.toLowerCase())),
+    phones: sorted((L.phones || []).map(p => p.number)),
+    app_matches: sorted((L.app_matches || []).map(m => appIdentity(m))),
+    app_coverage: ["ios", "android"].map(p => L.app_coverage?.[p] || "unknown"),
+  };
+}
+
+function appIdentity(app) {
+  try {
+    const url = new URL(app.url);
+    return app.platform + ":" + (app.platform === "ios" ? url.pathname.match(/id(\d+)/)?.[1] || url.pathname : url.searchParams.get("id") || url.pathname);
+  } catch { return app.platform + ":" + (app.app_id || app.url || ""); }
+}
+
+function reviewConflicts(raw, override) {
+  if (!override) return [];
+  if (!override.review_basis) return override.review_reason ? ["Legacy correction needs reconfirmation"] : [];
+  const current = reviewFacts(raw);
+  const reviewed = reviewFacts({ ...raw, ...override });
+  return Object.keys(current).filter(key => JSON.stringify(current[key]) !== JSON.stringify(override.review_basis[key])
+    && JSON.stringify(current[key]) !== JSON.stringify(reviewed[key]));
+}
+
 function effectiveLeads() {
   const overrides = ls.get(LS_KEYS.overrides, {});
-  return (state.data?.leads || []).map(L => ({ ...L, ...overrides[L.domain] }));
+  return (state.data?.leads || []).map(L => {
+    const override = overrides[L.domain];
+    const lead = { ...L, ...override };
+    lead.correction_conflicts = reviewConflicts(L, override);
+    if (lead.correction_conflicts.length) lead.review_required = true;
+    return lead;
+  });
 }
 function leadOf(domain) { return effectiveLeads().find(L => L.domain === domain); }
 
@@ -322,8 +382,9 @@ document.getElementById("auth-form").addEventListener("submit", async (e) => {
 // ──────────────────────────────────────────────────────────────────────────
 
 function renderStats() {
-  const stages = Object.values(ls.get(LS_KEYS.pipeline, {})).map(e => e.stage);
   const leads = effectiveLeads();
+  const businesses = [...new Set(leads.map(L => businessOf(L.domain)))];
+  const stages = businesses.map(domain => stageOf(domain));
   const ready = leads.filter(L => !isArchived(L) && !L.review_required);
   const fresh = leads.filter(L => !stageOf(L.domain) && !isArchived(L) && !L.review_required).length;
   const cards = [
@@ -344,6 +405,70 @@ function renderStats() {
     </div>
   `).join("");
   document.getElementById("stats").innerHTML = html;
+  renderHealth(leads);
+  renderChanges();
+  renderOutcomes();
+}
+
+function freshnessIssues(L) {
+  const issues = [];
+  if (L.error || L.fetch_failures) issues.push("fetch failed");
+  if (L.check_incomplete) issues.push("check incomplete");
+  if (!["ios", "android"].every(platform => ["found", "no_match"].includes(L.app_coverage?.[platform]))) issues.push("app checks unresolved");
+  if (L.contact_incomplete) issues.push("contact check partial");
+  for (const [label, value] of [["qualification", L.last_qualification_checked], ["contacts", L.last_contact_success], ["apps", L.last_app_success]]) {
+    const days = value ? (Date.now() - Date.parse(value)) / 86400000 : NaN;
+    if (!Number.isFinite(days)) issues.push(`${label} freshness unknown`);
+    else if (days >= 31) issues.push(`${label} stale`);
+  }
+  return issues;
+}
+
+function renderHealth(leads) {
+  const health = state.data?.health || {};
+  const discovery = health.discovery || {};
+  const rows = Object.entries(health.source_yield || {}).map(([source, counts]) => {
+    const run = discovery.sources?.[source];
+    return `<tr><td>${escapeHtml(source)}</td><td>${counts.domains}</td><td>${counts.qualified}</td><td>${counts.contactable}</td><td>${escapeHtml(run ? run.error || `${run.domains} found · ${run.seconds}s · ${run.http_requests} requests` : "Not attempted in latest discovery")}</td></tr>`;
+  }).join("");
+  const qualificationRun = health.mode === "qualification" ? health : health.last_qualification_run;
+  document.getElementById("crawler-health").innerHTML = `
+    <p class="small">${health.at ? `Latest run: ${escapeHtml(health.mode)} · ${escapeHtml(formatRelativeAndAbsolute(health.at))} · ${health.http_requests} HTTP requests · ${health.seconds}s` : "Run metrics will appear after the next pipeline run."}</p>
+    <p class="small">${qualificationRun ? `Latest qualification batch: ${qualificationRun.processed} processed · ${qualificationRun.failed} failed/incomplete · ${qualificationRun.contact_incomplete || 0} partial contact checks.` : "No qualification run metrics yet."} ${health.remaining ?? "—"} domains awaiting checks.</p>
+    <p class="small health-warning">${leads.filter(L => freshnessIssues(L).length).length} leads have stale, unknown, or incomplete checks. A recent attempt is not necessarily a successful check.</p>
+    <p class="small">Discovery attempted ${escapeHtml(discovery.last_attempt || "never")} · last budget-complete pass ${escapeHtml(discovery.last_completed || "unknown")}${discovery.budget_exhausted ? " · budget exhausted" : ""}. Crawler-only source totals overlap and exclude browser corrections/grouping. Qualified means a lead status without review/archive flags; freshness may still need attention.</p>
+    <table><thead><tr><th>Source</th><th>Discovered</th><th>Qualified</th><th>Contactable</th><th>Latest discovery attempt</th></tr></thead><tbody>${rows}</tbody></table>
+    ${Object.entries(discovery.sources || {}).filter(([source]) => !health.source_yield?.[source]).map(([source, run]) => `<p class="small">${escapeHtml(source)}: ${escapeHtml(run.error || `${run.domains} found · ${run.seconds}s`)}</p>`).join("")}`;
+}
+
+function recentChanges() {
+  const since = ls.get(LS_KEYS.changesSeen) || new Date(Date.now() - 7 * 86400000).toISOString();
+  return (state.data?.leads || []).flatMap(L => (L.changes || []).filter(change => change.at > since).map(change => ({ ...change, domain: L.domain })))
+    .sort((a, b) => b.at.localeCompare(a.at));
+}
+
+function changeValue(value) {
+  return Array.isArray(value) ? value.join(", ") || "none" : value == null ? "not previously qualified" : String(value);
+}
+
+function changeLine(change) {
+  return `${change.field.replaceAll("_", " ")}: ${changeValue(change.before)} → ${changeValue(change.after)}`;
+}
+
+function renderChanges() {
+  const changes = recentChanges();
+  document.getElementById("changes-count").textContent = `(${changes.length})`;
+  document.getElementById("changes-list").innerHTML = changes.length ? `<ul class="change-list">${changes.map(change => `<li><button class="ghost-btn" data-open-lead="${escapeHtml(change.domain)}">${escapeHtml(change.domain)}</button> ${escapeHtml(change.at.slice(0, 10))} · ${escapeHtml(changeLine(change))}</li>`).join("")}</ul>` : '<p class="muted small">No unseen changes. Tracking begins with the next successful checks.</p>';
+  document.querySelectorAll("[data-open-lead]").forEach(button => button.addEventListener("click", () => openLead(button.dataset.openLead)));
+}
+
+function openLead(domain) {
+  const L = leadOf(domain);
+  if (!L) return;
+  state.filters = { view: isArchived(L) ? "archived" : L.review_required ? "review" : "active", tier: "all", status: "all", contact: "all", platform: "all", reach: "all", focus: false, search: domain };
+  state.expandedDomain = domain;
+  saveFilters(); restoreFiltersAndSort(); renderTable();
+  document.getElementById("table-wrap").scrollIntoView({ block: "start" });
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -352,12 +477,15 @@ function renderStats() {
 
 function applyFiltersAndSort() {
   const pipe = ls.get(LS_KEYS.pipeline, {});
+  const changed = new Set(recentChanges().map(change => change.domain));
   const q = state.filters.search.trim().toLowerCase();
   let rows = effectiveLeads();
 
   rows = rows.filter(L => {
     if (state.filters.view === "archived") {
       if (!isArchived(L)) return false;
+    } else if (state.filters.view === "changed") {
+      if (!changed.has(L.domain)) return false;
     } else {
       if (isArchived(L)) return false;
       if (state.filters.view === "review" && !L.review_required) return false;
@@ -366,7 +494,7 @@ function applyFiltersAndSort() {
     if (state.filters.platform !== "all" && L.platform !== state.filters.platform) return false;
     if (state.filters.tier !== "all" && L.lead_tier !== state.filters.tier) return false;
     if (state.filters.status !== "all" && L.status !== state.filters.status) return false;
-    const stage = pipe[L.domain]?.stage || "";
+    const stage = pipe[businessOf(L.domain)]?.stage || "";
     const cf = state.filters.contact;
     if (cf === "uncontacted" && stage) return false;
     if (cf === "active" && !ACTIVE_STAGES.has(stage)) return false;
@@ -378,6 +506,7 @@ function applyFiltersAndSort() {
     if (rf === "whatsapp" && !hasWa(L)) return false;
     if (rf === "any" && !hasAnyContact(L)) return false;
     if (rf === "none" && hasAnyContact(L)) return false;
+    if (rf === "social" && !(L.social_profiles || []).length) return false;
     if (q) {
       const hay = (L.domain + " " + (L.store_name || "") + " " +
         (L.emails || []).map(e => e.address).join(" ")).toLowerCase();
@@ -400,8 +529,8 @@ function applyFiltersAndSort() {
       av = appAgeDays(a) ?? -1;
       bv = appAgeDays(b) ?? -1;
     } else if (key === "contacted") {
-      av = pipe[a.domain]?.at || "";
-      bv = pipe[b.domain]?.at || "";
+      av = pipe[businessOf(a.domain)]?.at || "";
+      bv = pipe[businessOf(b.domain)]?.at || "";
     } else {
       av = a[key]; bv = b[key];
     }
@@ -412,7 +541,13 @@ function applyFiltersAndSort() {
   });
 
   if (state.filters.focus) {
-    rows = rows.filter(L => !pipe[L.domain]?.stage && !isArchived(L) && !L.review_required && hasAnyContact(L)).slice(0, 10);
+    const seen = new Set();
+    rows = rows.filter(L => {
+      const business = businessOf(L.domain);
+      if (seen.has(business) || pipe[business]?.stage || isArchived(L) || L.review_required || !hasAnyContact(L)) return false;
+      seen.add(business);
+      return true;
+    }).slice(0, 10);
   }
 
   state.filtered = rows;
@@ -420,6 +555,7 @@ function applyFiltersAndSort() {
 
 function renderTable() {
   applyFiltersAndSort();
+  state.selectedIndex = Math.min(state.selectedIndex, state.filtered.length - 1);
   const pipe = ls.get(LS_KEYS.pipeline, {});
   const tbody = document.getElementById("leads-body");
   const empty = document.getElementById("empty-state");
@@ -429,7 +565,7 @@ function renderTable() {
     empty.hidden = false;
   } else {
     empty.hidden = true;
-    tbody.innerHTML = state.filtered.map((L, i) => renderRow(L, i, pipe[L.domain])).join("");
+    tbody.innerHTML = state.filtered.map((L, i) => renderRow(L, i, pipe[businessOf(L.domain)])).join("");
   }
 
   const hiddenN = Object.keys(ls.get(LS_KEYS.hidden, {})).length;
@@ -474,6 +610,7 @@ function renderRow(L, idx, pipeEntry) {
   const tier = L.lead_tier || "?";
   const score = L.lead_score ?? "?";
   const status = L.status || "?";
+  const issues = freshnessIssues(L);
   const ageDays = appAgeDays(L);
   const ageStr = ageDays != null ? humanAge(ageDays) : "—";
   const reasons = (L.score_reasons || []).slice(0, 3).map(r =>
@@ -520,7 +657,7 @@ function renderRow(L, idx, pipeEntry) {
       <td class="col-reach" data-label="Reach">${reachCell}</td>
       <td data-label="App age">${ageStr}</td>
       <td data-label="Reasons"><div class="reasons">${reasons}</div></td>
-      <td data-label="Last check">${escapeHtml(L.last_checked || "")}</td>
+      <td data-label="Last attempt">${escapeHtml(L.last_checked || "never")}<span class="freshness health-warning">${escapeHtml(issues.join(" · "))}</span>${L.correction_conflicts?.length ? '<span class="freshness health-warning">Correction conflicts with new evidence</span>' : ""}</td>
       <td data-label="Pipeline">${pipeCell}</td>
     </tr>
   `;
@@ -547,7 +684,7 @@ function injectExpanded(rowEl) {
   // Wire up actions inside the expanded view
   const root = expandedTr;
   root.querySelector("[data-action=copy-email]")?.addEventListener("click", () => {
-    const draft = root.querySelector(".email-draft").textContent;
+    const draft = root.querySelector(".email-draft").value;
     copyToClipboard(draft);
   });
   root.querySelector("[data-action=copy-wa]")?.addEventListener("click", () => {
@@ -572,6 +709,12 @@ function injectExpanded(rowEl) {
     renderStats(); renderTable();
   });
   root.querySelector("[data-action=save-review]")?.addEventListener("click", () => saveReview(domain, root));
+  root.querySelector("[data-action=group-business]")?.addEventListener("click", () => groupBusiness(domain, root.querySelector("[data-business-target]").value));
+  root.querySelector("[data-action=ungroup-business]")?.addEventListener("click", () => ungroupBusiness(domain));
+  root.querySelector("[data-action=log-sent]")?.addEventListener("click", () => logSent(domain, root));
+  root.querySelector("[data-action=open-mail]")?.addEventListener("click", e => {
+    e.currentTarget.href = mailtoHref(lead, root.querySelector(".email-draft").value);
+  });
   root.querySelector("[data-action=reset-review]")?.addEventListener("click", () => {
     const overrides = ls.get(LS_KEYS.overrides, {});
     delete overrides[domain];
@@ -585,20 +728,16 @@ function injectExpanded(rowEl) {
   }
   root.querySelector("[data-action=regen-template]")?.addEventListener("change", (e) => {
     const which = e.target.value;
-    root.querySelector(".email-draft").textContent = buildEmail(lead, which);
+    root.querySelector(".email-draft").value = buildEmail(lead, which);
   });
   const notesEl = root.querySelector(".notes-area");
   if (notesEl) {
-    notesEl.value = (ls.get(LS_KEYS.notes, {})[domain]) || "";
-    let timer;
+    notesEl.value = (ls.get(LS_KEYS.notes, {})[businessOf(domain)]) || "";
     notesEl.addEventListener("input", () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        const all = ls.get(LS_KEYS.notes, {});
-        if (notesEl.value.trim()) all[domain] = notesEl.value;
-        else delete all[domain];
-        ls.set(LS_KEYS.notes, all);
-      }, 400);
+      const all = ls.get(LS_KEYS.notes, {});
+      if (notesEl.value.trim()) all[businessOf(domain)] = notesEl.value;
+      else delete all[businessOf(domain)];
+      ls.set(LS_KEYS.notes, all);
     });
   }
 }
@@ -618,6 +757,7 @@ function renderExpandedContent(L) {
         ${m.url ? `· <a href="${escapeHtml(m.url)}" target="_blank" rel="noopener noreferrer">open</a>` : ""}
       </div>
       <div class="muted small">
+        observed ${escapeHtml(m.observed_at || "date unknown")}${L.app_coverage?.[m.platform] !== "found" ? " · last-known listing; latest ownership check unresolved" : ""} ·
         ${m.developer ? `dev: ${escapeHtml(m.developer)} · ` : ""}
         ${m.last_updated ? `updated ${m.last_updated}` : ""}
         ${(m.rating || 0) > 0 ? ` · ★ ${m.rating} (${m.review_count || 0})` : ""}
@@ -626,7 +766,8 @@ function renderExpandedContent(L) {
     </div>
   `).join("") || `<p class="muted small">No app matches.</p>`;
 
-  const which = L.status === "has_app" ? "hasApp" : "noApp";
+  const opportunity = outreachOpportunity(L);
+  const which = defaultTemplate(L);
   const draft = buildEmail(L, which);
   const waDraft = buildWhatsApp(L);
   const wa = (L.phones || []).find(p => p.channel === "whatsapp");
@@ -639,16 +780,26 @@ function renderExpandedContent(L) {
     `<p class="small"><a href="${escapeHtml(safeUrl(e.source_url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.signal)}</a>: ${escapeHtml(e.excerpt)} (${escapeHtml(e.observed_at || "")})</p>`).join("");
   const coverage = Object.entries(L.app_coverage || {}).map(([p, result]) => `${p}: ${result}`).join(" · ") || "Not verified with current detector";
   const candidates = (L.app_candidates || []).map(m => `<p class="small">Review ownership: <a href="${escapeHtml(safeUrl(m.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(m.name)}</a> · ${escapeHtml(m.developer)}</p>`).join("");
+  const raw = (state.data.leads || []).find(lead => lead.domain === L.domain);
+  const business = businessOf(L.domain);
+  const suggestions = (L.duplicate_candidates || []).map(match => `<p class="small">Possible same business: ${escapeHtml(match.domain)} · ${escapeHtml(match.reasons.join("; "))}</p>`).join("");
+  const groupTargets = (state.data.leads || []).filter(lead => businessOf(lead.domain) !== business).map(lead => [lead.domain, lead.domain]);
+  const conflicts = L.correction_conflicts || [];
+  const timeline = [
+    ...(pipeOf(L.domain)?.history || []).map(event => ({ at: event.at, text: `${STAGE_LABELS[event.stage] || event.stage}${event.reason ? `: ${event.reason}` : ""}` })),
+    ...(pipeOf(L.domain)?.touches || []).map(touch => ({ at: touch.at, text: `Sent via ${touch.channel} · ${touch.template} · ${touch.domain}` })),
+  ].sort((a, b) => b.at.localeCompare(a.at));
 
   // Build contact-info block (emails + phones with role/channel badges).
   const emailsHtml = (L.emails || []).map(e =>
-    `<div class="expand-contact-row"><span class="role-badge role-${escapeHtml(e.role)}">${escapeHtml(e.role)}</span> <span class="contact-val">${escapeHtml(e.address)}</span></div>`
+    `<div class="expand-contact-row"><span class="role-badge role-${escapeHtml(e.role)}">${escapeHtml(e.role)}</span> <span class="contact-val">${escapeHtml(e.address)}</span> <span class="muted small">observed ${escapeHtml(e.observed_at || "date unknown")}</span></div>`
   ).join("");
   const phonesHtml = (L.phones || []).map(p =>
-    `<div class="expand-contact-row"><span class="role-badge role-${escapeHtml(p.channel)}">${escapeHtml(p.channel)}</span> <span class="contact-val">${escapeHtml(p.number)}</span></div>`
+    `<div class="expand-contact-row"><span class="role-badge role-${escapeHtml(p.channel)}">${escapeHtml(p.channel)}</span> <span class="contact-val">${escapeHtml(p.number)}</span> <span class="muted small">observed ${escapeHtml(p.observed_at || "date unknown")}</span></div>`
   ).join("");
-  const reachBlock = (emailsHtml || phonesHtml)
-    ? `<section class="expand-section"><h4>Reach</h4>${emailsHtml}${phonesHtml}</section>`
+  const socialsHtml = (L.social_profiles || []).map(profile => `<div class="expand-contact-row"><a href="${escapeHtml(safeUrl(profile.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(profile.platform)}</a> <span class="muted small">linked from <a href="${escapeHtml(safeUrl(profile.source_url))}" target="_blank" rel="noopener noreferrer">store page</a>; ownership not independently verified</span></div>`).join("");
+  const reachBlock = (emailsHtml || phonesHtml || socialsHtml)
+    ? `<section class="expand-section"><h4>Reach</h4>${emailsHtml}${phonesHtml}${socialsHtml}</section>`
     : "";
 
   return `
@@ -664,7 +815,12 @@ function renderExpandedContent(L) {
               <dt>Status</dt><dd>${humanStatus(L.status)}</dd>
               <dt>Score</dt><dd>${L.lead_score ?? "?"} (${L.lead_tier ?? "?"}) · priority ${priorityOf(L)}</dd>
               <dt>First seen</dt><dd>${escapeHtml(L.first_seen || "—")}</dd>
-              <dt>Last checked</dt><dd>${escapeHtml(L.last_checked || "—")}</dd>
+              <dt>Last attempt</dt><dd>${escapeHtml(raw.last_checked || "never")}</dd>
+              <dt>Site fetch succeeded</dt><dd>${escapeHtml(raw.last_site_success || "unknown")}</dd>
+              <dt>Qualification completed</dt><dd>${escapeHtml(raw.last_qualification_checked || "unknown")}</dd>
+              <dt>Contacts attempted / succeeded</dt><dd>${escapeHtml(raw.last_contact_checked || "unknown")} / ${escapeHtml(raw.last_contact_success || "unknown")}</dd>
+              <dt>Apps attempted / resolved</dt><dd>${escapeHtml(raw.last_app_checked || "unknown")} / ${escapeHtml(raw.last_app_success || "unknown")}</dd>
+              <dt>Per-platform resolved</dt><dd>${escapeHtml(Object.entries(raw.app_success_by_platform || {}).map(([platform, at]) => `${platform}: ${at}`).join(" · ") || "unknown")}</dd>
               <dt>Last qualified</dt><dd>${escapeHtml(L.last_qualified || "—")}</dd>
               <dt>Confidence</dt><dd>${escapeHtml(L.qualification_confidence || "low")}</dd>
               <dt>Lifecycle</dt><dd>${escapeHtml(isHidden(L.domain) ? "manually dismissed" : L.lifecycle || "active")} ${escapeHtml(L.archive_reason || "")}</dd>
@@ -677,6 +833,8 @@ function renderExpandedContent(L) {
               <dt>Search queries</dt><dd>${escapeHtml((L.discovery_queries || []).join("; "))}</dd>
               <dt>App age</dt><dd>${ageDays != null ? humanAge(ageDays) : "—"}</dd>
             </dl>
+            <p class="small health-warning">${escapeHtml(freshnessIssues(raw).join(" · "))}</p>
+            ${(raw.contact_checks || []).filter(check => check.status === "failed").map(check => `<p class="small health-warning">Contact page failed: ${escapeHtml(check.source_url)} · ${escapeHtml(check.error || "empty response")}</p>`).join("")}
           </div>
           <div class="detail-section">
             <h4>Score components</h4>
@@ -700,12 +858,25 @@ function renderExpandedContent(L) {
             ${L.error ? `<p class="small">Last fetch: ${escapeHtml(L.error)}</p>` : ""}
           </div>
           ${reachBlock}
+          <div class="detail-section">
+            <h4>Business grouping</h4>
+            <p class="small">Outreach record: ${escapeHtml(business)}. Group only after confirming these stores belong to the same business. Shared contacts can be agencies, not owners.</p>
+            ${suggestions}
+            <label>Primary business <select data-business-target><option value="">Choose a store</option>${options(groupTargets, "")}</select></label>
+            <div class="btn-row"><button data-action="group-business" class="ghost-btn">Confirm same business</button>${business !== L.domain ? '<button data-action="ungroup-business" class="ghost-btn">Separate this domain</button>' : ""}</div>
+          </div>
+          <div class="detail-section">
+            <h4>Business changes</h4>
+            <ul class="change-list">${(L.changes || []).slice().reverse().map(change => `<li>${escapeHtml(change.at.slice(0, 10))} · ${escapeHtml(changeLine(change))}</li>`).join("") || '<li class="muted small">No recorded changes yet.</li>'}</ul>
+          </div>
         </div>
 
         <div>
           <div class="detail-section">
             <h4>Manual review</h4>
-            <p class="muted small">Corrections stay in this browser and survive data refreshes. Export personal data to back them up. Changed facts clear the score; use automatic facts again to accept a refreshed score.</p>
+            <p class="muted small">Corrections stay in this browser and survive data refreshes. New conflicting evidence requires another review. Changed facts clear the score; use automatic facts again to accept a refreshed score.</p>
+            ${L.reviewed_at ? `<p class="small">Reviewed ${escapeHtml(L.reviewed_at)} · crawler snapshot ${escapeHtml(L.review_data_at || "unknown")}</p>` : ""}
+            ${conflicts.length ? `<div class="evidence-box conflict-box"><strong>New evidence conflicts with your correction</strong><p>${escapeHtml(conflicts.join(", "))}</p><p class="small">Latest automatic facts: ${escapeHtml(JSON.stringify(reviewFacts(raw)))}</p><p class="small">Review the evidence above, then save again or use automatic facts.</p></div>` : ""}
             <label>Platform <select data-review="platform">${options([["woo", "WooCommerce"], ["shopify", "Shopify"], ["", "Unknown"]], L.platform || "")}</select></label>
             <label>App status <select data-review="status">${options([["app_unknown", "Unknown"], ["no_app", "No app found (reviewed)"], ["has_app", "Owned app (reviewed)"]], ["no_app", "has_app"].includes(L.status) ? L.status : "app_unknown")}</select></label>
             <label>Location <select data-review="location">${options([["unknown", "Unknown"], ["local_contact", "Lebanon business/contact"], ["serves_lebanon", "Ships to Lebanon only"]], L.location_relationship === "likely_local" ? "local_contact" : L.location_relationship || "unknown")}</select></label>
@@ -719,14 +890,14 @@ function renderExpandedContent(L) {
           <div class="detail-section">
             <h4>Email draft
               <select data-action="regen-template" class="ghost-btn" style="float:right; font-size:11px;">
-                <option value="${which}" selected>${which === "hasApp" ? "Revamp" : "Cold"}</option>
-                <option value="${which === "hasApp" ? "noApp" : "hasApp"}">${which === "hasApp" ? "Cold" : "Revamp"}</option>
+                ${options([...(opportunity ? [["opportunity", opportunity.label]] : []), ["noApp", "Introduction"], ["hasApp", "App review"]], which)}
               </select>
             </h4>
-            <pre class="email-draft">${escapeHtml(draft)}</pre>
+            ${opportunity ? `<div class="evidence-box"><strong>${escapeHtml(opportunity.label)}</strong><p class="small">${escapeHtml(opportunity.evidence)}</p><p class="muted small">These observations are conversation starters, not evidence of revenue or app quality.</p></div>` : '<p class="muted small">No verified specific opportunity; use a neutral introduction.</p>'}
+            <textarea class="email-draft" rows="12" aria-label="Email draft">${escapeHtml(draft)}</textarea>
             <div class="btn-row">
               <button data-action="copy-email" class="primary-btn">📋 Copy email</button>
-              ${email0 ? `<a href="${escapeHtml(mailtoHref(L))}" class="ghost-btn">✉️ Open mail</a>` : ""}
+              ${email0 ? `<a href="${escapeHtml(mailtoHref(L))}" data-action="open-mail" class="ghost-btn">✉️ Open mail</a>` : ""}
               <a href="https://${escapeHtml(L.domain)}" target="_blank" rel="noopener noreferrer" class="ghost-btn">↗ Open shop</a>
             </div>
           </div>
@@ -740,11 +911,16 @@ function renderExpandedContent(L) {
           </div>
           <div class="detail-section">
             <h4>Pipeline</h4>
+            <p class="muted small">Copying or opening a draft does not count as sending. Log only messages you actually sent; the first logged message determines attribution.</p>
+            <label>Sent via <select data-outreach-channel>${options([["email", "Email"], ["whatsapp", "WhatsApp"], ["social", "Social DM"], ["phone", "Phone"], ["other", "Other"]], "email")}</select></label>
+            <label>Template / campaign label (optional) <input data-outreach-template placeholder="Uses the selected draft type if blank"></label>
+            <button data-action="log-sent" class="primary-btn">Log sent</button>
             <div class="btn-row">
               ${Object.entries(STAGE_LABELS).map(([s, label]) =>
                 `<button data-action="stage" data-stage="${s}" class="ghost-btn${stageOf(L.domain) === s ? " active-stage" : ""}">${label}</button>`).join("")}
               <button data-action="clear-stage" class="ghost-btn">↺ Reset</button>
             </div>
+            <ul class="change-list">${timeline.map(event => `<li>${escapeHtml(event.at.slice(0, 10))} · ${escapeHtml(event.text)}</li>`).join("")}</ul>
             <div class="followup-row">
               <label class="muted small">Follow up <input type="date" data-action="followup"></label>
               <button data-action="dismiss" class="ghost-btn">${isHidden(L.domain) ? "Undo dismissal" : "Archive / dismiss"}</button>
@@ -776,8 +952,46 @@ function toggleExpand(domain) {
 // Email template
 // ──────────────────────────────────────────────────────────────────────────
 
-function buildEmail(lead, which /* "noApp" | "hasApp" */) {
-  const tpl = lead.status === "app_unknown" ? DEFAULT_TEMPLATES.noApp : which === "hasApp"
+function outreachOpportunity(L) {
+  if (L.review_required || isArchived(L) || L.error || L.fetch_failures || L.check_incomplete || L.correction_conflicts?.length
+    || L.qualification_result !== "qualified" || !L.last_qualified || (Date.now() - Date.parse(L.last_qualified)) >= 31 * 86400000) return null;
+  const apps = L.app_matches || [];
+  const appDate = L.reviewed_at || L.last_app_success;
+  const appFresh = appDate && (Date.now() - Date.parse(appDate)) < 31 * 86400000;
+  const coverage = L.app_coverage || {};
+  if (appFresh) {
+    for (const [platform, label, other, otherLabel] of [["ios", "iOS", "android", "Android"], ["android", "Android", "ios", "iOS"]]) {
+      if (coverage[platform] === "no_match" && apps.some(app => app.platform === other)) {
+        return { id: `gap-${platform}`, label: `${label} opportunity`,
+          observation: `I found your ${otherLabel} app listing, but couldn't confirm an ${label} app. Do you currently offer one?`,
+          suggestion: `If ${label} is a gap you want to address, I'd be interested in discussing an app connected to your online store.`,
+          evidence: `${otherLabel}: owned listing · ${label}: no match in completed checks · observed ${appDate.slice(0, 10)}` };
+      }
+    }
+    const low = apps.find(app => app.observed_at && (Date.now() - Date.parse(app.observed_at)) < 31 * 86400000
+      && (app.review_count || 0) >= 20 && app.rating > 0 && app.rating < 3.5);
+    if (low) return { id: "rating-review", label: "Customer feedback review",
+      observation: `Your ${low.platform === "ios" ? "iOS" : "Android"} listing showed a ${low.rating} rating from ${low.review_count} ratings when checked.`,
+      suggestion: "I'd like to understand the feedback behind those ratings and whether there are mobile shopping improvements I could help with.",
+      evidence: `${low.url} · ${low.rating}/5 · ${low.review_count} ratings · observed ${low.observed_at}` };
+  }
+  if (L.repeat_category && L.last_qualified && (Date.now() - Date.parse(L.last_qualified)) < 31 * 86400000) {
+    return { id: "repeat-purchase", label: "Repeat-shopping discussion",
+      observation: `I came across your ${L.repeat_category} catalog.`,
+      suggestion: "Does repeat ordering matter to your customers? I'd be interested in discussing whether reorder shortcuts or opt-in restock notifications would be useful.",
+      evidence: `Detected category: ${L.repeat_category} · storefront observed ${L.last_qualified} · a fit proxy, not measured repeat purchasing` };
+  }
+  return null;
+}
+
+function defaultTemplate(lead) {
+  return outreachOpportunity(lead) ? "opportunity" : lead.status === "has_app" ? "hasApp" : "noApp";
+}
+
+function buildEmail(lead, which = defaultTemplate(lead)) {
+  const opportunity = outreachOpportunity(lead);
+  const tpl = lead.status === "app_unknown" || lead.review_required ? DEFAULT_TEMPLATES.noApp : which === "opportunity" && opportunity
+    ? DEFAULT_TEMPLATES.opportunity : which === "hasApp"
     ? ls.get(LS_KEYS.templateHasApp, DEFAULT_TEMPLATES.hasApp)
     : ls.get(LS_KEYS.templateNoApp, DEFAULT_TEMPLATES.noApp);
   const sig = ls.get(LS_KEYS.templateSig, DEFAULT_TEMPLATES.sig);
@@ -790,7 +1004,9 @@ function buildEmail(lead, which /* "noApp" | "hasApp" */) {
     : "";
   const ios = (lead.app_matches || []).find(m => m.platform === "ios")?.url || "";
   const android = (lead.app_matches || []).find(m => m.platform === "android")?.url || "";
-  const observation = lead.status === "no_app"
+  const observation = !lead.review_required && which === "opportunity" && opportunity ? opportunity.observation : lead.review_required
+    ? "Do you currently offer a mobile app for your store?"
+    : lead.status === "no_app"
     ? "I couldn't find a confirmed iOS or Android app in my checks. Do you currently have one?"
     : lead.status === "has_app"
       ? "I found your store's app listing. " + (lead.app_matches || []).map(m => `${m.platform === "ios" ? "iOS" : "Android"}${m.last_updated ? `: listing updated ${m.last_updated}` : ": update date not confirmed"}`).join("; ") + "."
@@ -801,6 +1017,7 @@ function buildEmail(lead, which /* "noApp" | "hasApp" */) {
     .replaceAll("{{domain}}", lead.domain)
     .replaceAll("{{platform}}", lead.platform === "woo" ? "WooCommerce" : lead.platform === "shopify" ? "Shopify" : "online")
     .replaceAll("{{app_observation}}", observation)
+    .replaceAll("{{opportunity}}", opportunity?.suggestion || "I'd like to understand whether a mobile app could help with your customers' shopping needs.")
     .replaceAll("{{app_age}}", ageStr)
     .replaceAll("{{app_age_year}}", ageYear)
     .replaceAll("{{product_count}}", productCountStr(lead))
@@ -813,21 +1030,25 @@ function buildEmail(lead, which /* "noApp" | "hasApp" */) {
 
 function buildWhatsApp(lead) {
   const tpl = ls.get(LS_KEYS.templateWa, DEFAULT_TEMPLATES.whatsapp);
+  const opportunity = outreachOpportunity(lead);
   const sig = ls.get(LS_KEYS.templateSig, DEFAULT_TEMPLATES.sig);
   const ageDays = appAgeDays(lead);
   const ageStr = ageDays != null ? humanAge(ageDays) : "some time ago";
   return tpl
     .replaceAll("{{store_name}}", lead.store_name || lead.domain)
     .replaceAll("{{domain}}", lead.domain)
+    .replaceAll("{{platform}}", lead.platform === "woo" ? "WooCommerce" : lead.platform === "shopify" ? "Shopify" : "online")
+    .replaceAll("{{app_observation}}", opportunity?.observation || "Do you currently offer a mobile app for your store?")
+    .replaceAll("{{opportunity}}", opportunity?.suggestion || "I'd like to understand your customers' mobile shopping needs.")
     .replaceAll("{{app_age}}", ageStr)
     .replaceAll("{{product_count}}", productCountStr(lead))
     .replaceAll("{{app_name}}", ((lead.app_matches || [])[0]?.name) || lead.store_name || lead.domain)
     .replaceAll("{{signature}}", sig);
 }
 
-function mailtoHref(lead) {
+function mailtoHref(lead, draft = buildEmail(lead)) {
   const email0 = (lead.emails || [])[0]?.address || "";
-  const full = buildEmail(lead, lead.status === "has_app" ? "hasApp" : "noApp");
+  const full = draft;
   const m = full.match(/^Subject:\s*(.*)$/m);
   const subject = m ? m[1] : `A mobile app for ${lead.store_name || lead.domain}`;
   const body = full.replace(/^Subject:.*\n/, "");
@@ -839,13 +1060,17 @@ function mailtoHref(lead) {
 // ──────────────────────────────────────────────────────────────────────────
 
 function setStage(domain, stage /* "contacted"|"replied"|"meeting"|"won"|"lost"|null */) {
+  domain = businessOf(domain);
   const all = ls.get(LS_KEYS.pipeline, {});
-  if (stage == null) delete all[domain];
+  if (stage == null) {
+    if (!confirm("Reset this business's pipeline and outreach history?")) return;
+    delete all[domain];
+  }
   else {
     const at = new Date().toISOString().slice(0, 10);
     const reason = stage === "lost" ? prompt("Reason (optional)", all[domain]?.reason || "") : all[domain]?.reason || "";
     all[domain] = { ...all[domain], stage, at, followup: all[domain]?.followup || "", reason: reason || "",
-      history: [...(all[domain]?.history || []), { stage, at, reason: reason || "" }] };
+      history: [...(all[domain]?.history || []), { stage, at: new Date().toISOString(), reason: reason || "" }] };
   }
   ls.set(LS_KEYS.pipeline, all);
   toast(stage ? `Marked ${STAGE_LABELS[stage].toLowerCase()}` : "Reset pipeline stage");
@@ -854,6 +1079,7 @@ function setStage(domain, stage /* "contacted"|"replied"|"meeting"|"won"|"lost"|
 }
 
 function setFollowup(domain, dateStr) {
+  domain = businessOf(domain);
   const all = ls.get(LS_KEYS.pipeline, {});
   const cur = all[domain] || { stage: "", at: "" };
   cur.followup = dateStr || "";
@@ -914,10 +1140,107 @@ function saveReview(domain, root) {
     emails: addresses.map(address => (lead.emails || []).find(e => e.address === address) || { address, role: "unknown", source_url: "manual review" }),
     phones: numbers.map(number => (lead.phones || []).find(p => p.number === number) || { number, channel: "phone", source_url: "manual review" }),
     app_matches: apps, review_required: status === "app_unknown" || value("location") !== "local_contact" || !value("platform"),
+    app_coverage: Object.fromEntries(["ios", "android"].map(platform => [platform, apps.some(app => app.platform === platform) ? "found" : status === "no_app" || lead.app_coverage?.[platform] === "no_match" ? "no_match" : "unknown"])),
     review_reason: reason, reviewed_at: new Date().toISOString(), qualification_confidence: "reviewed",
+    review_basis: reviewFacts(state.data.leads.find(L => L.domain === domain)), review_data_at: state.data.generated_at,
     lead_score: null, lead_tier: "?", score_components: {}, score_reasons: ["Manually corrected — automated score cleared"] };
   ls.set(LS_KEYS.overrides, overrides);
   toast("Reviewed facts saved locally"); renderStats(); renderTable();
+}
+
+function groupBusiness(domain, target) {
+  if (!target || !leadOf(target)) { toast("Choose a primary business first"); return; }
+  const from = businessOf(domain);
+  const to = businessOf(target);
+  if (from === to) return;
+  if (!confirm(`Group ${from} with ${to}? All grouped domains will share ${to}'s stage and follow-up (or inherit ${from}'s if empty). Notes and history are combined. No store facts are merged.`)) return;
+  const links = ls.get(LS_KEYS.businesses, {});
+  const pipeline = ls.get(LS_KEYS.pipeline, {});
+  const notes = ls.get(LS_KEYS.notes, {});
+  let chosen = pipeline[to] || pipeline[from];
+  if (pipeline[from] && pipeline[to] && (pipeline[from].stage !== pipeline[to].stage || pipeline[from].followup !== pipeline[to].followup)) {
+    const describe = key => `${key}: ${STAGE_LABELS[pipeline[key].stage] || "no stage"}, follow-up ${pipeline[key].followup || "none"}`;
+    const choice = prompt(`${describe(to)}\n${describe(from)}\nType primary to keep ${to}'s stage/follow-up, or source to use ${from}'s. Both histories will be preserved.`, "primary");
+    if (!["primary", "source"].includes(choice)) return;
+    chosen = choice === "source" ? pipeline[from] : pipeline[to];
+  }
+  if (pipeline[from]) {
+    pipeline[to] = { ...chosen,
+      history: [...(pipeline[to]?.history || []), ...(pipeline[from].history || [])].sort((a, b) => a.at.localeCompare(b.at)),
+      touches: [...(pipeline[to]?.touches || []), ...(pipeline[from].touches || [])].sort((a, b) => a.at.localeCompare(b.at)) };
+    delete pipeline[from];
+  }
+  if (notes[from]) {
+    notes[to] = [notes[to], `[${from}] ${notes[from]}`].filter(Boolean).join("\n\n");
+    delete notes[from];
+  }
+  links[from] = to;
+  ls.set(LS_KEYS.businesses, links);
+  ls.set(LS_KEYS.pipeline, pipeline);
+  ls.set(LS_KEYS.notes, notes);
+  toast("Businesses grouped locally"); renderStats(); renderTable();
+}
+
+function ungroupBusiness(domain) {
+  if (!confirm("Separate this domain? Shared outreach history and notes will stay with the primary business.")) return;
+  const links = ls.get(LS_KEYS.businesses, {});
+  const root = businessOf(domain);
+  for (const member of Object.keys(links)) {
+    if (member !== domain && businessOf(member) === root) links[member] = root;
+  }
+  delete links[domain];
+  ls.set(LS_KEYS.businesses, links);
+  renderStats(); renderTable();
+}
+
+function logSent(domain, root) {
+  const lead = leadOf(domain);
+  const channel = root.querySelector("[data-outreach-channel]").value;
+  const which = root.querySelector("[data-action=regen-template]").value;
+  const emailDraft = root.querySelector(".email-draft").value;
+  const emailTemplate = lead.review_required || lead.status === "app_unknown" ? "neutral" : which === "opportunity" ? outreachOpportunity(lead)?.id || "introduction" : which;
+  const template = root.querySelector("[data-outreach-template]").value.trim()
+    || (channel === "email" ? emailTemplate + (emailDraft !== buildEmail(lead, which) ? " (edited)" : "") : channel === "whatsapp" ? "whatsapp" : "manual");
+  if (!confirm(`Confirm you sent outreach to ${domain} via ${channel}?`)) return;
+  const business = businessOf(domain);
+  const pipeline = ls.get(LS_KEYS.pipeline, {});
+  const at = new Date().toISOString();
+  const entry = pipeline[business] || { stage: "", at: "", followup: "" };
+  const touch = { at, domain, channel, template, tier: lead.lead_tier || "unknown", sources: lead.discovery_sources || [],
+    draft: channel === "email" ? emailDraft : channel === "whatsapp" ? buildWhatsApp(lead) : "" };
+  entry.touches = [...(entry.touches || []), touch];
+  if (!entry.stage) {
+    entry.stage = "contacted";
+    entry.at = at.slice(0, 10);
+    entry.history = [...(entry.history || []), { stage: "contacted", at }];
+  }
+  pipeline[business] = entry;
+  ls.set(LS_KEYS.pipeline, pipeline);
+  toast("Sent outreach recorded"); renderStats(); renderTable();
+}
+
+function renderOutcomes() {
+  const pipeline = ls.get(LS_KEYS.pipeline, {});
+  const groups = {};
+  let total = 0;
+  for (const [domain, entry] of Object.entries(pipeline)) {
+    if (businessOf(domain) !== domain || !entry.touches?.length) continue;
+    const first = entry.touches.slice().sort((a, b) => a.at.localeCompare(b.at))[0];
+    const stages = new Set((entry.history || []).filter(event => Date.parse(event.at) >= Date.parse(first.at)).map(event => event.stage));
+    const won = stages.has("won");
+    const meeting = won || stages.has("meeting");
+    const replied = meeting || stages.has("replied");
+    total++;
+    const dimensions = [["Channel", first.channel], ["Template", first.template], ["Tier at send", first.tier], ...[...new Set(first.sources?.length ? first.sources : ["unknown"])].map(source => ["Discovery source", source])];
+    for (const [dimension, value] of dimensions) {
+      const key = JSON.stringify([dimension, value]);
+      const row = groups[key] ||= { dimension, value, sent: 0, replied: 0, meeting: 0, won: 0 };
+      row.sent++; row.replied += Number(replied); row.meeting += Number(meeting); row.won += Number(won);
+    }
+  }
+  const rate = (n, sent) => `${n}/${sent} (${Math.round(n / sent * 100)}%)`;
+  const rows = Object.values(groups).sort((a, b) => a.dimension.localeCompare(b.dimension) || b.sent - a.sent).map(row => `<tr><td>${escapeHtml(row.dimension)}</td><td>${escapeHtml(row.value)}</td><td>${row.sent}</td><td>${rate(row.replied, row.sent)}</td><td>${rate(row.meeting, row.sent)}</td><td>${rate(row.won, row.sent)}</td></tr>`).join("");
+  document.getElementById("outreach-outcomes").innerHTML = `<p class="small">${total} businesses with logged sends. Rates use the first logged send per business, tier/source at send time, and subsequent recorded stages. Meetings/wins count toward earlier funnel stages. Source rows overlap. Template names are labels, not experiments; small samples are not reliable comparisons. Legacy stages without a logged send are excluded.</p>${rows ? `<table><thead><tr><th>Group</th><th>Value</th><th>Sent</th><th>Replied</th><th>Meeting</th><th>Won</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted small">Use “Log sent” after sending a message, then update its pipeline stage.</p>'}`;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -925,6 +1248,10 @@ function saveReview(domain, root) {
 // ──────────────────────────────────────────────────────────────────────────
 
 function hookGlobalUI() {
+  document.getElementById("btn-changes-seen").addEventListener("click", () => {
+    ls.set(LS_KEYS.changesSeen, new Date().toISOString());
+    renderChanges(); renderTable();
+  });
   // Filter chips
   document.querySelectorAll(".filter-group").forEach(group => {
     const filter = group.dataset.filter;
@@ -1040,12 +1367,14 @@ function hookSettingsUI() {
   document.getElementById("btn-export-personal").addEventListener("click", exportPersonal);
   document.getElementById("import-personal").addEventListener("change", importPersonal);
   document.getElementById("btn-clear-personal").addEventListener("click", () => {
-    if (!confirm("Erase all pipeline stages, dismissed leads, and notes? This can't be undone.")) return;
+    if (!confirm("Erase pipeline/outreach history, business groups, corrections, dismissed leads, and notes? This can't be undone.")) return;
     ls.del(LS_KEYS.pipeline);
     ls.del(LS_KEYS.contacted);
     ls.del(LS_KEYS.hidden);
     ls.del(LS_KEYS.notes);
     ls.del(LS_KEYS.overrides);
+    ls.del(LS_KEYS.businesses);
+    ls.del(LS_KEYS.changesSeen);
     renderStats();
     renderTable();
     toast("Personal data cleared");
@@ -1097,13 +1426,15 @@ function saveSettings() {
 
 function exportPersonal() {
   const blob = {
-    schema: 2,
+    schema: 3,
     exported_at: new Date().toISOString(),
     pipeline: ls.get(LS_KEYS.pipeline, {}),
     contacted: ls.get(LS_KEYS.contacted, {}),
     hidden: ls.get(LS_KEYS.hidden, {}),
     overrides: ls.get(LS_KEYS.overrides, {}),
     notes: ls.get(LS_KEYS.notes, {}),
+    businesses: ls.get(LS_KEYS.businesses, {}),
+    changesSeen: ls.get(LS_KEYS.changesSeen),
     templates: {
       noApp: ls.get(LS_KEYS.templateNoApp),
       hasApp: ls.get(LS_KEYS.templateHasApp),
@@ -1127,6 +1458,9 @@ async function importPersonal(e) {
     if (blob.hidden) ls.set(LS_KEYS.hidden, blob.hidden);
     if (blob.overrides) ls.set(LS_KEYS.overrides, blob.overrides);
     if (blob.notes) ls.set(LS_KEYS.notes, blob.notes);
+    if (blob.businesses) ls.set(LS_KEYS.businesses, blob.businesses);
+    else if (blob.pipeline || blob.contacted) ls.del(LS_KEYS.businesses);
+    if ("changesSeen" in blob) ls.set(LS_KEYS.changesSeen, blob.changesSeen);
     if (blob.templates?.noApp) ls.set(LS_KEYS.templateNoApp, blob.templates.noApp);
     if (blob.templates?.hasApp) ls.set(LS_KEYS.templateHasApp, blob.templates.hasApp);
     if (blob.templates?.whatsapp) ls.set(LS_KEYS.templateWa, blob.templates.whatsapp);
@@ -1151,8 +1485,8 @@ function exportFilteredCsv() {
   if (!state.filtered.length) { toast("Nothing to export"); return; }
   const pipe = ls.get(LS_KEYS.pipeline, {});
   const cols = ["priority", "lead_score", "lead_tier", "status", "domain", "store_name", "platform", "qualification_confidence", "lifecycle", "archive_reason", "review_reason", "product_count_kind",
-                "product_count", "emails", "phones", "stage", "followup",
-                "woo_score", "lb_score", "first_seen", "last_checked",
+                "product_count", "emails", "phones", "social_profiles", "business", "stage", "followup",
+                "woo_score", "lb_score", "first_seen", "last_checked", "last_qualification_checked", "last_contact_success", "last_app_success", "freshness_issues", "correction_conflicts", "first_sent", "channel", "template",
                 "ios_url", "android_url", "ios_updated", "android_updated"];
   const head = cols.join(",");
   const rows = state.filtered.map(L => {
@@ -1163,8 +1497,15 @@ function exportFilteredCsv() {
       priority: priorityOf(L),
       emails: (L.emails || []).map(e => e.address).join(";"),
       phones: (L.phones || []).map(p => p.number).join(";"),
-      stage: pipe[L.domain]?.stage || "",
-      followup: pipe[L.domain]?.followup || "",
+      social_profiles: (L.social_profiles || []).map(p => p.url).join(";"),
+      business: businessOf(L.domain),
+      stage: pipe[businessOf(L.domain)]?.stage || "",
+      followup: pipe[businessOf(L.domain)]?.followup || "",
+      freshness_issues: freshnessIssues(L).join(";"),
+      correction_conflicts: (L.correction_conflicts || []).join(";"),
+      first_sent: pipe[businessOf(L.domain)]?.touches?.[0]?.at || "",
+      channel: pipe[businessOf(L.domain)]?.touches?.[0]?.channel || "",
+      template: pipe[businessOf(L.domain)]?.touches?.[0]?.template || "",
       ios_url: ios.url || "", android_url: and.url || "",
       ios_updated: ios.last_updated || "", android_updated: and.last_updated || "",
     };
@@ -1242,7 +1583,7 @@ function onKey(e) {
   } else if (e.key === "d") {
     toggleHidden(lead.domain);
   } else if (e.key === "e") {
-    copyToClipboard(buildEmail(lead, lead.status === "has_app" ? "hasApp" : "noApp"));
+    copyToClipboard(buildEmail(lead));
   }
 }
 
